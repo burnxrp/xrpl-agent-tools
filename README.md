@@ -16,7 +16,7 @@ public XRPL nodes, and the result is enforced by ledger consensus.
 
 | Package | What it is |
 |---|---|
-| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, **DEX (order book, quotes, fill-or-kill swaps, limit orders) and AMM (pool info, deposit, withdraw)**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
+| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, **DEX (order book, quotes, fill-or-kill swaps, limit orders) and AMM (pool info, deposit, withdraw)**, **issuer clawback**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
 | `packages/mcp` | **Local MCP adapter** (stdio). Read tools answer directly. Every state-changing tool creates an **approval request** that the account owner signs in the console. The adapter never holds or sees a seed. |
 | `apps/console` | **XRPL Agent Console**. A static dashboard that connects straight to public XRPL nodes from the browser. Opened from an agent's review link, it also shows the agent's approval inbox. |
 
@@ -59,6 +59,9 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_swap` | **xrpl.dex.swap** | needs human approval |
 | `xrpl_limit_order`, `xrpl_offer_cancel` | xrpl.dex.order / .cancel | needs human approval |
 | `xrpl_amm_deposit`, `xrpl_amm_withdraw` | xrpl.amm.deposit / .withdraw | needs human approval |
+| `xrpl_clawback_status`, `xrpl_token_holders` | xrpl.clawback.status / xrpl.token.holders | read |
+| `xrpl_clawback_enable` | xrpl.clawback.enable | needs human approval · **permanent** |
+| `xrpl_clawback` | **xrpl.clawback** | needs human approval · issuer-only, never autonomous |
 | `xrpl_agent_account_create` | xrpl.agent.create | creates an agent account (key stays on this machine) |
 | `xrpl_agent_accounts`, `xrpl_agent_account_status` | xrpl.agent.status | read: balance (the hard cap), policy, last 24 h |
 | `xrpl_agent_pay` | **xrpl.agent.pay** | **autonomous**: no human step, within the owner's policy |
@@ -95,6 +98,15 @@ Payments are **never partial**. The partial-payment flag is refused when the tra
 - **The proof shows balance changes.** For trades, the validated proof lists exactly what moved in your account, for example `-5 XRP`, `+45.2 AGT`.
 - **If the pool moves after approval:** a deposit that would now need more of the second asset than the agent's request stated is refused. The agent must ask again.
 
+### Issuer clawback
+
+An issuer can take its tokens back from a holder, for example after fraud, a mistaken send, or a compliance order. It's the XRPL's native XLS-39 feature:
+
+- **It must be enabled before issuing.** `AllowTrustLineClawback` can only be set while the issuer account owns nothing on the ledger: no trustlines, offers or escrows. **It can never be turned off.** Holders can see the flag on the issuer before they trust the token. `xrpl_clawback_status` tells you whether it's enabled, or exactly why it can't be.
+- **Clawbacks are exact.** You name the holder, token and amount. A request for more than the holder has is refused before any fee is spent, and the intent check verifies the holder, token and amount on the ledger.
+- **It's always a human decision.** Agents can only *request* a clawback, and the issuer approves it in the console, which lists every holder with a **Claw back** button. Agent accounts can't claw back.
+- Clawing back from AMM pools (`AMMClawback`) and from MPTs isn't covered yet.
+
 ### How an approval works
 
 1. **The agent asks.** It calls `xrpl_escrow_create`. The adapter checks the request against the live ledger, so things like an unactivated destination, a bad time window or a missing destination tag are refused right away and no fee is wasted. It then returns an `approval_id` and a `review_url`.
@@ -128,6 +140,12 @@ We deliberately don't use XRPL's transaction-type delegation as a spending limit
 
 ## Status
 
+**Clawback is complete.** Verified on public Testnet:
+- enable on a fresh issuer;
+- refusals: enabling twice, enabling once trustlines exist, clawing more than the holder has, a holder without a line, an issuer without the flag;
+- an exact clawback whose intent matches the ledger copy;
+- the full agent request → issuer approval → adapter confirmation loop.
+
 **DEX & AMM are complete.** Verified on public Testnet with a real token and pool:
 - the quote picked the better source between the AMM and the book;
 - a swap with an impossible minimum was killed with only the fee spent;
@@ -149,4 +167,4 @@ We deliberately don't use XRPL's transaction-type delegation as a spending limit
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** issuer clawback, browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:** browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).

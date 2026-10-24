@@ -75,4 +75,4 @@ const st = await call("xrpl_agent_account_status", { address: acct.address });
 ok(st.spentLast24h.XRP === 17, `spend log counts sells: ${st.spentLast24h.XRP} XRP today`);
 
 console.log("ALL DEX/AMM MCP CHECKS PASSED");
-await mcp.close(); await ledger.disconnect?.(); process.exit(0);
+await mcp.close(); await ledger.close(); process.exit(0);

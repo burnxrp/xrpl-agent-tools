@@ -15,6 +15,7 @@ import {
   prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime, preparePayment,
   getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder, listOffers, prepareOfferCancel,
   prepareAmmDeposit, prepareAmmWithdraw, type Prepared, type Intent,
+  getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
 import { createAgent, agentStatus, agentPay, agentSwap, returnToOwner, listAgents } from "./agents.js";
@@ -319,6 +320,31 @@ server.registerTool("xrpl_agent_swap", {
   try { guardNetwork(); return json(await agentSwap(ledger, a.from, { sell: a.sell, amount: a.amount, buy: a.buy, slippagePct: a.slippage_pct })); }
   catch (e) { return fail(e); }
 });
+
+// ── Issuer clawback ─────────────────────────────────────────────────────────────
+server.registerTool("xrpl_clawback_status", {
+  title: "Clawback status", description: "Whether an issuer can claw back its tokens (AllowTrustLineClawback), or why it can't enable it.",
+  inputSchema: { issuer: ADDR }, annotations: READ,
+}, async ({ issuer }) => { try { return json(await getClawbackStatus(ledger, issuer)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_token_holders", {
+  title: "Token holders", description: "Accounts holding an issuer's tokens, largest first (optionally one currency).",
+  inputSchema: { issuer: ADDR, currency: z.string().min(3).max(40).optional() }, annotations: READ,
+}, async (a) => { try { return json(await listHolders(ledger, a.issuer, a.currency)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_clawback_enable", {
+  title: "Enable clawback (needs human approval, PERMANENT)",
+  description: "Request permanently allowing an issuer to claw back its tokens. Only possible before the issuer owns anything on the " +
+    "ledger (i.e. before issuing). Can never be turned off. Queued for the issuer's approval.",
+  inputSchema: { account: ADDR }, annotations: ACT,
+}, async (a) => { try { guardNetwork(); return queue("clawback_enable", a, await prepareEnableClawback(ledger, a)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_clawback", {
+  title: "Claw back tokens (needs human approval)",
+  description: "Request taking back `amount` of the issuer's token from one holder (exact — refused if they hold less). " +
+    "Issuer-only; never available to agent accounts. Queued for the issuer's approval.",
+  inputSchema: { account: ADDR.describe("the issuer"), holder: ADDR, currency: z.string().min(3).max(40), amount: NUM }, annotations: ACT,
+}, async (a) => { try { guardNetwork(); return queue("clawback", a, await prepareClawback(ledger, a)); } catch (e) { return fail(e); } });
 
 server.registerTool("xrpl_approval_status", {
   title: "Approval status", description: "Status of an approval request: pending, rejected, confirmed (with validated ledger proof) or failed.",

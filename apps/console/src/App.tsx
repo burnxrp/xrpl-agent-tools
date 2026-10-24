@@ -5,7 +5,8 @@ import {
   getAccount, getBalances, listEscrows, prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, submitSigned, verifyTx,
   preparePayment, type TokenBalance, type Asset, getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder,
   listOffers, prepareOfferCancel, prepareAmmDeposit, prepareAmmWithdraw, type AmmPool, type AmmPosition, type OrderBook,
-  type OpenOffer, type SwapQuote,
+  type OpenOffer, type SwapQuote, getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
+  type ClawbackStatus, type Holder,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
 import { forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, type DevWallet } from "./wallet";
@@ -16,7 +17,7 @@ const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "account", name: "Account", sub: "Balances & permissions", ready: true },
   { id: "escrow", name: "Escrow", sub: "Create · Finish · Cancel", ready: true },
   { id: "payments", name: "Payments", sub: "XRP & issued tokens", ready: true },
-  { id: "clawback", name: "Clawback", sub: "Issuer-only recovery", ready: false },
+  { id: "clawback", name: "Clawback", sub: "Issuer-only recovery", ready: true },
   { id: "dex", name: "DEX & AMM", sub: "Swap · Orders · Liquidity", ready: true },
   { id: "proof", name: "Ledger Proof", sub: "Validated transactions", ready: true },
   { id: "agents", name: "Agent accounts", sub: "Autonomous · capped by balance", ready: true },
@@ -94,6 +95,7 @@ export default function App() {
       {tool === "account" && <AccountTool acct={acct} network={network} />}
       {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
+      {tool === "clawback" && <ClawbackTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "dex" && <DexTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "proof" && <ProofTool ledger={ledger} />}
       {tool === "agents" && <AgentsTool token={link.token} ledger={ledger} wallet={wallet} onReview={setReview} onMsg={flash} />}
@@ -340,6 +342,8 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
         : a.intent.tool === "limit_order" ? await prepareLimitOrder(ledger, i)
         : a.intent.tool === "offer_cancel" ? await prepareOfferCancel(ledger, i)
         : a.intent.tool === "amm_withdraw" ? await prepareAmmWithdraw(ledger, i)
+        : a.intent.tool === "clawback_enable" ? await prepareEnableClawback(ledger, i)
+        : a.intent.tool === "clawback" ? await prepareClawback(ledger, i)
         : await (async () => {
             const d = await prepareAmmDeposit(ledger, i);
             if (Number(d.amount2) > Number(i.amount2) * (1 + 1e-9))
@@ -541,6 +545,48 @@ function DexTool({ ledger, wallet, realValue, onReview, onMsg }: {
         <tbody>{offers.map((o) => <tr key={o.sequence}><td>{o.sequence}</td><td>{o.sells}</td><td>{o.wants}</td><td>{o.price.toPrecision(6)}</td>
           <td className="actions"><button className="small ghost" disabled={off} onClick={() => review(`Cancel order #${o.sequence}`,
             () => prepareOfferCancel(ledger, { account: acct, sequence: o.sequence }))}>Cancel</button></td></tr>)}</tbody></table>}
+    </section>
+  );
+}
+
+// ── Issuer clawback ───────────────────────────────────────────────────────────
+function ClawbackTool({ ledger, wallet, realValue, onReview, onMsg }: {
+  ledger: Ledger; wallet: DevWallet | null; realValue: boolean; onReview: (r: Review) => void; onMsg: (ok: boolean, t: string) => void;
+}) {
+  const [st, setSt] = useState<ClawbackStatus | null>(null), [holders, setHolders] = useState<Holder[]>([]);
+  const [amts, setAmts] = useState<Record<string, string>>({}), [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!wallet) return;
+    try { setSt(await getClawbackStatus(ledger, wallet.address)); setHolders(await listHolders(ledger, wallet.address)); }
+    catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+  }, [ledger, wallet]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); window.addEventListener("ledger-changed", load); return () => window.removeEventListener("ledger-changed", load); }, [load]);
+  async function review(title: string, fn: () => Promise<Prepared<any>>) {
+    setBusy(true);
+    try { onReview({ title, prepared: await fn() }); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+  }
+  if (!wallet) return <section className="card"><h2>Clawback</h2><p className="muted">Connect the issuer's Testnet wallet.</p></section>;
+  const off = busy || realValue, key = (h: Holder) => `${h.holder}:${h.code}`;
+  return (
+    <section className="card">
+      <h2>Clawback <span className="muted small">issuer-only · XLS-39 · for the connected wallet as issuer</span></h2>
+      {!st ? <p className="muted">Loading…</p> : st.enabled
+        ? <p className="good">Clawback is enabled for this issuer (permanent). Holders can see this on your account.</p>
+        : st.canEnable ? <>
+            <p>Clawback is <b>off</b>. You can enable it now because this account owns nothing on the ledger yet. <b>It can never be turned off</b>, and it must happen before you issue tokens.</p>
+            <button id="cb-enable" disabled={off} onClick={() => review("Enable clawback (permanent)", () => prepareEnableClawback(ledger, { account: wallet.address }))}>Review: enable clawback</button>
+          </>
+        : <p className="muted">Clawback is off and can't be enabled: {st.why}.</p>}
+      <h3>Holders of your tokens</h3>
+      {holders.length === 0 ? <p className="muted small">No one holds tokens issued by this account.</p> :
+        <table className="tbl"><thead><tr><th>Holder</th><th>Token</th><th>Balance</th><th /></tr></thead><tbody>
+          {holders.map((h) => <tr key={key(h)}><td className="mono">{h.holder}</td><td>{h.currency}{h.frozen ? " · frozen" : ""}</td><td>{h.balance}</td>
+            <td className="actions">{st?.enabled && <>
+              <input style={{ width: 110 }} value={amts[key(h)] ?? ""} placeholder="amount" onChange={(e) => setAmts({ ...amts, [key(h)]: e.target.value.trim() })} />
+              <button className="small" disabled={off || !amts[key(h)]} onClick={() => review("Claw back tokens",
+                () => prepareClawback(ledger, { account: wallet.address, holder: h.holder, currency: h.code, amount: amts[key(h)] }))}>Claw back</button></>}
+            </td></tr>)}
+        </tbody></table>}
     </section>
   );
 }

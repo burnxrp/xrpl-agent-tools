@@ -7,6 +7,7 @@ import { currencyCode, type PaymentInput } from "./tools/payment.js";
 import { sameAsset, amountValue, toCurrency } from "./amounts.js";
 import type { SwapInput, LimitOrderInput } from "./tools/dex.js";
 import type { AmmDepositInput, AmmWithdrawInput } from "./tools/amm.js";
+import type { ClawbackInput } from "./tools/clawback.js";
 
 export type Intent =
   | { tool: "escrow_create"; input: EscrowCreateInput & { finishAfterRipple?: number; cancelAfterRipple?: number } }
@@ -17,7 +18,9 @@ export type Intent =
   | { tool: "limit_order"; input: LimitOrderInput }
   | { tool: "offer_cancel"; input: { account: string; sequence: number } }
   | { tool: "amm_deposit"; input: AmmDepositInput & { amount2: string } }
-  | { tool: "amm_withdraw"; input: AmmWithdrawInput };
+  | { tool: "amm_withdraw"; input: AmmWithdrawInput }
+  | { tool: "clawback_enable"; input: { account: string } }
+  | { tool: "clawback"; input: ClawbackInput };
 
 export function matchesIntent(intent: Intent, tx: Record<string, any>): { ok: boolean; why?: string } {
   const must = (cond: boolean, why: string) => (cond ? null : why);
@@ -48,6 +51,16 @@ export function matchesIntent(intent: Intent, tx: Record<string, any>): { ok: bo
       must(tx.TransactionType === "AMMDeposit", "not an AMMDeposit"),
       must(tx.Account === i.account && samePool(), "different account or pool"),
       must(amountValue(tx.Amount) === Number(i.amount1) && amountValue(tx.Amount2) <= Number(i.amount2) * (1 + 1e-9), "different deposit amounts"),
+    ] :
+    intent.tool === "clawback_enable" ? [
+      must(tx.TransactionType === "AccountSet" && tx.Account === i.account, "not an AccountSet by the issuer"),
+      must(Number(tx.SetFlag) === 16 && tx.ClearFlag === undefined, "not exactly 'enable clawback'"),
+      must(!tx.TransferRate && !tx.Domain && !tx.RegularKey, "changes more than the clawback flag"),
+    ] :
+    intent.tool === "clawback" ? [
+      must(tx.TransactionType === "Clawback" && tx.Account === i.account, "not a Clawback by the issuer"),
+      must(typeof tx.Amount === "object" && tx.Amount.issuer === i.holder && tx.Amount.currency === currencyCode(i.currency)
+           && Number(tx.Amount.value) === Number(i.amount), "different holder, token or amount"),
     ] :
     intent.tool === "amm_withdraw" ? [
       must(tx.TransactionType === "AMMWithdraw", "not an AMMWithdraw"),
