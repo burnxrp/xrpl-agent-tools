@@ -1,7 +1,7 @@
 // Local Testnet/Devnet wallet for v1. The seed lives in this tab's sessionStorage only — it is never sent to any
 // node, API or the agent; signing happens here. Mainnet signing is not offered in v1.
 import { Wallet } from "xrpl";
-import { signLocally } from "@xrpl-agent/core";
+import { signLocally, signPolicy as signPolicyCore } from "@xrpl-agent/core";
 
 const KEY = "xrpl_agent_dev_wallet";
 
@@ -26,4 +26,11 @@ export function sign(tx: Record<string, unknown>): { txBlob: string; hash: strin
   const w = JSON.parse(sessionStorage.getItem(KEY) || "null");
   if (!w?.seed) throw new Error("No wallet connected");
   return signLocally(w.seed, tx);
+}
+
+/** Owner signs an agent's spending policy with the connected wallet (key never leaves this tab). */
+export function signAgentPolicy(agent: string, policy: import("@xrpl-agent/core").AgentPolicy) {
+  const w = JSON.parse(sessionStorage.getItem(KEY) || "null");
+  if (!w?.seed) throw new Error("No wallet connected");
+  return signPolicyCore(w.seed, agent, policy);
 }

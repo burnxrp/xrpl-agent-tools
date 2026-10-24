@@ -15,6 +15,7 @@ import {
   prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime, preparePayment,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
+import { createAgent, agentStatus, agentPay, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
 const log = (...a: unknown[]) => console.error("[xrpl-agent]", ...a);   // stdout belongs to MCP
@@ -139,6 +140,79 @@ server.registerTool("xrpl_payment_send", {
     log("approval requested:", ap.id, p.summary);
     return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary,
                   warnings: p.warnings, next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
+  } catch (e) { return fail(e); }
+});
+
+// ── Agent accounts: autonomous spending from a separately funded account (ledger balance = hard cap) ──
+const ASSET = z.union([z.literal("XRP"), z.object({ currency: z.string().min(3).max(40), issuer: ADDR })]);
+
+server.registerTool("xrpl_agent_account_create", {
+  title: "Create an agent account",
+  description: "Create a separately funded XRPL account this agent can spend from autonomously. Its key is generated and encrypted " +
+    "on this machine and never revealed. The OWNER (a human wallet) funds it and is the only one who can change its spending policy " +
+    "(defaults: 10 XRP per payment, 25 XRP per 24 h, no tokens). Exposure is capped by whatever the owner funds it with. " +
+    "On Testnet/Devnet, fund_from_faucet gets test XRP.",
+  inputSchema: { owner: ADDR.describe("the human wallet that controls and funds this agent account"),
+                 label: z.string().max(40).optional(), fund_from_faucet: z.boolean().optional() },
+  annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const r = await createAgent(ledger, a.owner, a.label ?? "agent", !!a.fund_from_faucet);
+    return json({ ...r, next: a.fund_from_faucet ? "Funded from the Testnet faucet." :
+      "Ask the owner to fund it (xrpl_agent_request_funding), then spend with xrpl_agent_pay." });
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_agent_accounts", {
+  title: "List agent accounts", description: "Agent accounts on this machine for the current network (address, owner, policy).",
+  inputSchema: {}, annotations: READ,
+}, async () => json(listAgents(network)));
+
+server.registerTool("xrpl_agent_account_status", {
+  title: "Agent account status",
+  description: "Balance (= the hard cap on what this agent can spend), spending policy, amount spent in the last 24 hours, recent spends.",
+  inputSchema: { address: ADDR }, annotations: READ,
+}, async ({ address }) => { try { return json(await agentStatus(ledger, address)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_agent_pay", {
+  title: "Pay from the agent account (autonomous)",
+  description: "Send XRP or an issued token FROM an agent account, signed automatically — no human approval — if it fits the owner's " +
+    "policy (per-payment and 24-hour limits, allowed destinations, allowed tokens) and the account's balance. Returns the validated ledger proof.",
+  inputSchema: { from: ADDR.describe("the agent account"), destination: ADDR,
+                 amount: z.string().regex(/^\d+(\.\d+)?$/), asset: ASSET,
+                 destination_tag: z.number().int().nonnegative().optional(), memo: z.string().max(200).optional() },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+}, async (a) => {
+  try {
+    guardNetwork();
+    const proof = await agentPay(ledger, a.from, { destination: a.destination, amount: a.amount, asset: a.asset,
+                                                    destinationTag: a.destination_tag, memo: a.memo });
+    log("autonomous payment:", a.from, "→", a.destination, a.amount, proof.result);
+    return json(proof);
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_agent_return_to_owner", {
+  title: "Return funds to the owner",
+  description: "Send XRP from an agent account back to its owner (always allowed, never limited). Default: everything spendable.",
+  inputSchema: { address: ADDR, amount: z.string().regex(/^\d+(\.\d+)?$/).optional() }, annotations: ACT,
+}, async (a) => { try { return json(await returnToOwner(ledger, a.address, a.amount)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_agent_request_funding", {
+  title: "Ask the owner to top up (needs human approval)",
+  description: "Create an approval request for the owner to send XRP to the agent account. Nothing moves until the owner approves.",
+  inputSchema: { address: ADDR.describe("the agent account"), amount: z.string().regex(/^\d+(\.\d+)?$/), reason: z.string().max(200).optional() },
+  annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const st = await agentStatus(ledger, a.address);
+    const input = { account: st.owner, destination: a.address, amount: a.amount, asset: "XRP" as const, memo: a.reason ? `top-up: ${a.reason}` : "agent top-up" };
+    const p = await preparePayment(ledger, input);
+    const ap = approvals.add({ network, intent: { tool: "payment", input }, summary: `Fund agent account ${a.address}: ${a.amount} XRP`,
+                               details: { ...p.details, reason: a.reason ?? "—" }, warnings: p.warnings });
+    return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: ap.summary });
   } catch (e) { return fail(e); }
 });
 

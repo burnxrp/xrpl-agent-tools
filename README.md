@@ -55,6 +55,11 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_escrow_create` | **xrpl.escrow.create** | needs human approval |
 | `xrpl_escrow_finish`, `xrpl_escrow_cancel` | xrpl.escrow.finish / .cancel | needs human approval |
 | `xrpl_payment_send` | **xrpl.payment.send** | needs human approval |
+| `xrpl_agent_account_create` | xrpl.agent.create | creates an agent account (key stays on this machine) |
+| `xrpl_agent_accounts`, `xrpl_agent_account_status` | xrpl.agent.status | read: balance (the hard cap), policy, last 24 h |
+| `xrpl_agent_pay` | **xrpl.agent.pay** | **autonomous**: no human step, within the owner's policy |
+| `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
+| `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
 | `xrpl_tx_verify` | xrpl.ledger.proof | read |
 
@@ -85,6 +90,22 @@ Payments are **never partial**. The partial-payment flag is refused when the tra
 4. **The adapter checks independently.** It looks up the hash on the ledger and confirms the transaction is validated and matches the approved request **exactly**: same sender, destination, amount and times. A mismatch is marked `failed`.
 5. **The agent gets the proof.** It polls `xrpl_approval_status` and receives `confirmed` with the validated ledger proof.
 
+## Agent accounts (autonomous spending)
+
+An agent account is a **separate XRPL account that the owner funds**. The agent can spend from it **without asking**, and three layers keep that bounded:
+
+| Layer | Enforced by |
+|---|---|
+| **Hard cap: the agent can never spend more than you fund it with** | **The XRP Ledger.** It's simply the account's balance. |
+| **Spending rules:** a per-payment limit, a 24-hour limit, allowed destinations, allowed tokens. Defaults: 10 XRP, 25 XRP/day, any destination, no tokens. | The local adapter, as defence in depth. Spends are processed one at a time, so simultaneous payments can't race past a limit. |
+| **Only the owner can change the rules** | Every policy change must be **signed by the owner's wallet** and carry a higher version number. A session token alone isn't enough, so an agent that learns the console link still can't raise its own limits. |
+
+The agent account's key is generated on the agent's machine and encrypted (AES-256-GCM, scrypt key) with a machine key, or with `XRPL_AGENT_PASSPHRASE` if you set one. No tool ever returns it.
+
+Funds can always go back to the owner, with `xrpl_agent_return_to_owner` or the console's **Return funds to owner** button. The console's **Agent accounts** panel shows each account's balance (its cap), rules, spending and history, with **Fund**, **Edit limits** (signed by the owner) and **Return** buttons.
+
+We deliberately don't use XRPL's transaction-type delegation as a spending limit, because it isn't one.
+
 ## Security model
 
 - **Seeds stay with their owner.** In v1, the console signs with a Testnet/Devnet wallet kept in that browser tab only (`sessionStorage`). The seed is never sent to any node, API, the adapter or the agent.
@@ -94,8 +115,16 @@ Payments are **never partial**. The partial-payment flag is refused when the tra
 
 ## Status
 
+**Agent accounts are complete.** Autonomous spending is capped by the ledger balance and an owner-signed policy. It was verified on Testnet with these results:
+- autonomous payments went through;
+- the per-payment and 24-hour limits held, including against 3 simultaneous payments;
+- a tampered signature, a forged owner and a replayed policy were all rejected;
+- the allowlist and token rules held;
+- returning funds to the owner worked;
+- an empty account couldn't spend.
+
 **Payments are complete**: XRP and issued tokens for agents and humans. They were verified on public Testnet, including a token with a 1% transfer fee.
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** issuer clawback, DEX/AMM, browser-extension wallets (GemWallet / Crossmark), and agent accounts for bounded autonomous spending.
+**Next:** issuer clawback, DEX/AMM, browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).

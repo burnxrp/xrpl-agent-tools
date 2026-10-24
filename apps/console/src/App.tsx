@@ -6,9 +6,10 @@ import {
   preparePayment, type TokenBalance,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
-import { forgetWallet, loadWallet, saveSeed, sign, type DevWallet } from "./wallet";
+import { forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, type DevWallet } from "./wallet";
+import type { AgentPolicy } from "@xrpl-agent/core";
 
-type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof";
+type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof" | "agents";
 const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "account", name: "Account", sub: "Balances & permissions", ready: true },
   { id: "escrow", name: "Escrow", sub: "Create · Finish · Cancel", ready: true },
@@ -16,6 +17,7 @@ const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "clawback", name: "Clawback", sub: "Issuer-only recovery", ready: false },
   { id: "dex", name: "DEX & AMM", sub: "Trading & liquidity", ready: false },
   { id: "proof", name: "Ledger Proof", sub: "Validated transactions", ready: true },
+  { id: "agents", name: "Agent accounts", sub: "Autonomous · capped by balance", ready: true },
 ];
 
 interface Review { title: string; prepared: Prepared<any>; onDone?: (p: LedgerProof) => void }
@@ -91,6 +93,7 @@ export default function App() {
       {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "proof" && <ProofTool ledger={ledger} />}
+      {tool === "agents" && <AgentsTool token={link.token} ledger={ledger} wallet={wallet} onReview={setReview} onMsg={flash} />}
 
       {review && <ReviewModal ledger={ledger} review={review} onClose={() => setReview(null)}
         onResult={(p) => { setReview(null); refresh(); window.dispatchEvent(new Event("ledger-changed")); flash(p.success, p.success ? `Validated on ledger ${p.ledgerIndex} — ${p.result}` : `Ledger result: ${p.result}`); }} />}
@@ -350,6 +353,70 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
       ))}
       {recent.length > 0 && <details><summary className="small">Recent</summary>{recent.map((a) => (
         <div key={a.id} className="muted small">{a.status.toUpperCase()} · {a.summary}{a.proof ? ` · ${a.proof.result}` : ""}{a.note ? ` · ${a.note}` : ""}</div>))}</details>}
+    </section>
+  );
+}
+
+interface AgentView { address: string; label: string; owner: string; exposureCapXrp: string; balanceXrp: string; activated: boolean;
+  policy: AgentPolicy; spentLast24h: Record<string, number>; recent: { at: string; amount: string; asset: string; destination: string; result: string; kind: string }[] }
+
+function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
+  token: string | null; ledger: Ledger; wallet: DevWallet | null; onReview: (r: Review) => void; onMsg: (ok: boolean, t: string) => void;
+}) {
+  const [list, setList] = useState<AgentView[]>([]);
+  const [edit, setEdit] = useState<string | null>(null);
+  const [form, setForm] = useState({ perTx: "", daily: "", allow: "" });
+  const load = useCallback(async () => { if (token) try { setList((await agentApi(token, "/agents")).agents); } catch (e) { onMsg(false, String(e)); } }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); const t = setInterval(load, 8000); window.addEventListener("ledger-changed", load);
+    return () => { clearInterval(t); window.removeEventListener("ledger-changed", load); }; }, [load]);
+  if (!token) return <section className="card"><h2>Agent accounts</h2><p className="muted">Agent accounts live with your AI agent. Open the console from your agent (its review link or xrpl_network_info) to manage them.</p></section>;
+  return (
+    <section className="card">
+      <h2>Agent accounts <span className="muted small">the agent spends on its own — never more than the balance you fund</span></h2>
+      {list.length === 0 ? <p className="muted">No agent accounts yet. Your agent can create one with xrpl_agent_account_create.</p> : list.map((a) => {
+        const mine = wallet?.address === a.policy.owner;
+        return (
+          <div key={a.address} className="req">
+            <div>
+              <b>{a.label}</b> <span className="mono small">{a.address}</span>
+              <div className="small">Can spend at most <b>{a.exposureCapXrp} XRP</b> (its balance) · limits {a.policy.xrp.perTx} per payment, {a.policy.xrp.daily} per 24 h
+                · spent {+(a.spentLast24h.XRP || 0).toFixed(6)} today{a.policy.allowedDestinations.length ? ` · only to ${a.policy.allowedDestinations.length} allowed address(es)` : " · any destination"}</div>
+              <div className="muted small">owner {a.policy.owner}{mine ? " (you)" : ""} · policy v{a.policy.version}</div>
+              {a.recent.slice(0, 3).map((r, k) => <div key={k} className="muted small">{new Date(r.at).toLocaleString()} · {r.kind} {r.amount} {r.asset.split(":")[0]} → {r.destination.slice(0, 8)}… · {r.result}</div>)}
+              {edit === a.address && (
+                <div className="form" style={{ marginTop: 8 }}>
+                  <label>Max per payment (XRP)<input id={`agent-pertx-${a.address}`} value={form.perTx} onChange={(e) => setForm({ ...form, perTx: e.target.value })} /></label>
+                  <label>Max per 24 h (XRP)<input id={`agent-daily-${a.address}`} value={form.daily} onChange={(e) => setForm({ ...form, daily: e.target.value })} /></label>
+                  <label>Allowed destinations (comma-separated, blank = any)<input id={`agent-allow-${a.address}`} value={form.allow} onChange={(e) => setForm({ ...form, allow: e.target.value })} /></label>
+                  <button id={`agent-save-${a.address}`} onClick={async () => {
+                    try {
+                      const policy: AgentPolicy = { ...a.policy, xrp: { perTx: form.perTx, daily: form.daily },
+                        allowedDestinations: form.allow.split(",").map((x) => x.trim()).filter(Boolean), version: a.policy.version + 1 };
+                      await agentApi(token, `/agents/${a.address}/policy`, { method: "POST", body: JSON.stringify({ policy, ...signAgentPolicy(a.address, policy) }) });
+                      onMsg(true, "New limits signed by your wallet and applied."); setEdit(null); load();
+                    } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+                  }}>Sign & save limits</button>
+                </div>)}
+            </div>
+            <div className="row" style={{ flexWrap: "wrap" }}>
+              <button id={`agent-fund-${a.address}`} disabled={!wallet} onClick={async () => {
+                const amt = window.prompt("Fund this agent account with how many XRP? This is the most it can ever spend.", "25");
+                if (!amt || !wallet) return;
+                try { onReview({ title: "Fund agent account", prepared: await preparePayment(ledger, { account: wallet.address, destination: a.address, amount: amt, asset: "XRP", memo: "agent funding" }), onDone: load }); }
+                catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+              }}>Fund</button>
+              <button id={`agent-edit-${a.address}`} className="ghost" disabled={!mine} title={mine ? "" : "connect the owner wallet"} onClick={() => {
+                setEdit(edit === a.address ? null : a.address);
+                setForm({ perTx: a.policy.xrp.perTx, daily: a.policy.xrp.daily, allow: a.policy.allowedDestinations.join(", ") });
+              }}>Edit limits</button>
+              <button id={`agent-return-${a.address}`} className="ghost" onClick={async () => {
+                if (!window.confirm("Send everything spendable back to the owner?")) return;
+                try { const r = await agentApi(token, `/agents/${a.address}/return`, { method: "POST", body: "{}" }); onMsg(r.proof.success, `Returned ${r.proof.delivered} — ${r.proof.result}`); load(); }
+                catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+              }}>Return funds to owner</button>
+            </div>
+          </div>);
+      })}
     </section>
   );
 }

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Ledger, verifyTx, matchesIntent } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
+import { listAgents, agentStatus, updatePolicy, returnToOwner } from "./agents.js";
 
 export const SESSION_TOKEN = randomBytes(24).toString("hex");
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
@@ -46,6 +47,18 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
         if (!authed(req, port)) return send(res, 401, { error: "missing or wrong console token — open the review link from your agent" });
         if (url.pathname === "/api/session") return send(res, 200, { network: ledger.network, endpoints: ledger.endpoints });
         if (url.pathname === "/api/approvals" && req.method === "GET") return send(res, 200, { approvals: approvals.list().slice().reverse() });
+        if (url.pathname === "/api/agents" && req.method === "GET") {
+          const list = await Promise.all(listAgents(ledger.network).map((a) => agentStatus(ledger, a.address).catch(() => ({ ...a, error: true }))));
+          return send(res, 200, { agents: list });
+        }
+        const am = url.pathname.match(/^\/api\/agents\/(r[1-9A-HJ-NP-Za-km-z]{24,34})\/(policy|return)$/);
+        if (am && req.method === "POST") {
+          // A policy change needs the OWNER wallet's signature (the session token alone is not enough —
+          // an agent that learned the review link still can't raise its own limits).
+          if (am[2] === "policy") { const b = await body(req); return send(res, 200, { policy: updatePolicy(am[1], b.policy, b.publicKey, b.signature) }); }
+          const b = await body(req);
+          return send(res, 200, { proof: await returnToOwner(ledger, am[1], b.amount) });
+        }
         const m = url.pathname.match(/^\/api\/approvals\/([0-9a-f]{12})\/(reject|result)$/);
         if (m && req.method === "POST") {
           const a = approvals.get(m[1]);
