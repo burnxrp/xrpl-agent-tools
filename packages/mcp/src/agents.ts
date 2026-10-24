@@ -8,7 +8,7 @@ import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:
 import { Wallet } from "xrpl";
 import {
   Ledger, type AgentPolicy, type Asset, defaultPolicy, checkSpend, assetKey, verifyPolicy,
-  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof,
+  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap,
 } from "@xrpl-agent/core";
 
 const HOME = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");
@@ -121,6 +121,21 @@ export function agentPay(ledger: Ledger, from: string, req: { destination: strin
     const proof = await submitSigned(ledger, signLocally(unseal(s.enc), p.tx).txBlob);
     record(from, { at: new Date().toISOString(), hash: proof.hash, asset: key, amount: req.amount, destination: req.destination,
                    result: proof.result, kind: req.destination === s.policy.owner ? "return" : "spend" });
+    return proof;
+  });
+}
+
+/** Autonomous swap from the agent account. The amount SOLD counts against the owner's limits for that asset. */
+export function agentSwap(ledger: Ledger, from: string, req: { sell: Asset; amount: string; buy: Asset; slippagePct?: number }): Promise<LedgerProof> {
+  return serial(from, async () => {
+    const s = read(from);
+    const key = assetKey(req.sell);
+    const verdict = checkSpend(s.policy, spentLast24h(from, key), { asset: req.sell, amount: req.amount });
+    if (!verdict.ok) throw new Error(`policy refused: ${verdict.why}`);
+    const p = await prepareSwap(ledger, { account: from, ...req, slippagePct: Math.min(req.slippagePct ?? 1, 5) });
+    const proof = await submitSigned(ledger, signLocally(unseal(s.enc), p.tx).txBlob);
+    if (proof.success) record(from, { at: new Date().toISOString(), hash: proof.hash, asset: key, amount: req.amount,
+                                      destination: "swap", result: proof.result, kind: "spend" });
     return proof;
   });
 }

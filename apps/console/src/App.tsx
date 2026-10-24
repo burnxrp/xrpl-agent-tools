@@ -3,7 +3,9 @@ import { Wallet, Client } from "xrpl";
 import {
   Ledger, NETWORKS, type NetworkId, type AccountInfo, type EscrowEntry, type LedgerProof, type Prepared, type Intent,
   getAccount, getBalances, listEscrows, prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, submitSigned, verifyTx,
-  preparePayment, type TokenBalance,
+  preparePayment, type TokenBalance, type Asset, getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder,
+  listOffers, prepareOfferCancel, prepareAmmDeposit, prepareAmmWithdraw, type AmmPool, type AmmPosition, type OrderBook,
+  type OpenOffer, type SwapQuote,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
 import { forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, type DevWallet } from "./wallet";
@@ -15,7 +17,7 @@ const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "escrow", name: "Escrow", sub: "Create · Finish · Cancel", ready: true },
   { id: "payments", name: "Payments", sub: "XRP & issued tokens", ready: true },
   { id: "clawback", name: "Clawback", sub: "Issuer-only recovery", ready: false },
-  { id: "dex", name: "DEX & AMM", sub: "Trading & liquidity", ready: false },
+  { id: "dex", name: "DEX & AMM", sub: "Swap · Orders · Liquidity", ready: true },
   { id: "proof", name: "Ledger Proof", sub: "Validated transactions", ready: true },
   { id: "agents", name: "Agent accounts", sub: "Autonomous · capped by balance", ready: true },
 ];
@@ -92,6 +94,7 @@ export default function App() {
       {tool === "account" && <AccountTool acct={acct} network={network} />}
       {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
+      {tool === "dex" && <DexTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "proof" && <ProofTool ledger={ledger} />}
       {tool === "agents" && <AgentsTool token={link.token} ledger={ledger} wallet={wallet} onReview={setReview} onMsg={flash} />}
 
@@ -271,6 +274,8 @@ function ProofView({ p }: { p: LedgerProof }) {
       <dt>Ledger</dt><dd>{p.ledgerIndex}</dd>
       {p.escrow && <><dt>Escrow</dt><dd className="mono">{p.escrow.owner}#{p.escrow.sequence}</dd></>}
       {p.delivered && <><dt>Delivered</dt><dd>{p.delivered}</dd></>}
+      {p.changes && p.changes.length > 0 && <><dt>Balance changes</dt><dd>{p.changes.map((c, i) =>
+        <div key={i} className={c.startsWith("-") ? "bad" : "good"}>{c}</div>)}</dd></>}
       <dt>Hash</dt><dd className="mono"><a href={p.explorer} target="_blank" rel="noreferrer">{p.hash}</a></dd>
     </dl>
   );
@@ -329,7 +334,18 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
         : a.intent.tool === "escrow_create"
         ? await prepareEscrowCreate(ledger, { account: i.account, destination: i.destination, amount: i.amount,
             finishAfter: i.finishAfter, cancelAfter: i.cancelAfter, destinationTag: i.destinationTag, memo: i.memo })
-        : a.intent.tool === "escrow_finish" ? await prepareEscrowFinish(ledger, i) : await prepareEscrowCancel(ledger, i);
+        : a.intent.tool === "escrow_finish" ? await prepareEscrowFinish(ledger, i)
+        : a.intent.tool === "escrow_cancel" ? await prepareEscrowCancel(ledger, i)
+        : a.intent.tool === "swap" ? await prepareSwap(ledger, i)            // keeps the agent's approved minimum
+        : a.intent.tool === "limit_order" ? await prepareLimitOrder(ledger, i)
+        : a.intent.tool === "offer_cancel" ? await prepareOfferCancel(ledger, i)
+        : a.intent.tool === "amm_withdraw" ? await prepareAmmWithdraw(ledger, i)
+        : await (async () => {
+            const d = await prepareAmmDeposit(ledger, i);
+            if (Number(d.amount2) > Number(i.amount2) * (1 + 1e-9))
+              throw new Error(`The pool moved: this deposit now needs ${d.amount2} (approved ${i.amount2}). Ask the agent to request it again.`);
+            return d;
+          })();
       onReview({ title: `Agent request · ${a.id}`, prepared, onDone: async (proof) => {
         try { await agentApi(token, `/approvals/${a.id}/result`, { method: "POST", body: JSON.stringify({ hash: proof.hash }) }); }
         catch (e) { onMsg(false, `Ledger result recorded, but the agent wasn't told: ${e}`); }
@@ -417,6 +433,114 @@ function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
             </div>
           </div>);
       })}
+    </section>
+  );
+}
+
+// ── DEX & AMM ─────────────────────────────────────────────────────────────────
+function assetFrom(code: string, issuer: string): Asset {
+  return code.trim().toUpperCase() === "XRP" || !code.trim() ? "XRP" : { currency: code.trim(), issuer: issuer.trim() };
+}
+function AssetInput({ id, label, code, issuer, setCode, setIssuer }: {
+  id: string; label: string; code: string; issuer: string; setCode: (v: string) => void; setIssuer: (v: string) => void;
+}) {
+  const xrp = code.trim().toUpperCase() === "XRP";
+  return (
+    <>
+      <label>{label}<input id={`${id}-code`} value={code} onChange={(e) => setCode(e.target.value)} placeholder="XRP or currency code" /></label>
+      {!xrp && <label>{label} issuer<input id={`${id}-issuer`} value={issuer} onChange={(e) => setIssuer(e.target.value.trim())} placeholder="r…" /></label>}
+    </>
+  );
+}
+
+function DexTool({ ledger, wallet, realValue, onReview, onMsg }: {
+  ledger: Ledger; wallet: DevWallet | null; realValue: boolean; onReview: (r: Review) => void; onMsg: (ok: boolean, t: string) => void;
+}) {
+  const [aCode, setACode] = useState("XRP"), [aIss, setAIss] = useState(""), [bCode, setBCode] = useState(""), [bIss, setBIss] = useState("");
+  const [amount, setAmount] = useState(""), [slip, setSlip] = useState("1"), [quote, setQuote] = useState<SwapQuote | null>(null);
+  const [limitBuy, setLimitBuy] = useState(""), [depAmt, setDepAmt] = useState(""), [wdLp, setWdLp] = useState("");
+  const [pool, setPool] = useState<AmmPool | null>(null), [pos, setPos] = useState<AmmPosition | null>(null), [book, setBook] = useState<OrderBook | null>(null);
+  const [offers, setOffers] = useState<OpenOffer[]>([]), [busy, setBusy] = useState(false), [poolErr, setPoolErr] = useState("");
+  const A = assetFrom(aCode, aIss), B = assetFrom(bCode, bIss);
+  const pairOk = !!bCode.trim() && (B === "XRP" || /^r\w{24,34}$/.test(bIss)) && (A === "XRP" || /^r\w{24,34}$/.test(aIss));
+  const lab = (x: Asset) => x === "XRP" ? "XRP" : x.currency;
+
+  const load = useCallback(async () => {
+    if (wallet) listOffers(ledger, wallet.address).then(setOffers).catch(() => setOffers([]));
+    if (!pairOk) { setPool(null); setBook(null); return; }
+    try {
+      const p = await getAmm(ledger, A, B); setPool(p); setPoolErr("");
+      setPos(wallet ? await getAmmPosition(ledger, wallet.address, p) : null);
+    } catch (e) { setPool(null); setPos(null); setPoolErr(e instanceof Error ? e.message : String(e)); }
+    getOrderBook(ledger, B, A, 5).then(setBook).catch(() => setBook(null));
+  }, [ledger, wallet, aCode, aIss, bCode, bIss]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setQuote(null); load(); window.addEventListener("ledger-changed", load);
+    return () => window.removeEventListener("ledger-changed", load); }, [load]);
+
+  async function review(title: string, fn: () => Promise<Prepared<any>>) {
+    setBusy(true);
+    try { onReview({ title, prepared: await fn() }); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+  }
+  if (!wallet) return <section className="card"><h2>DEX & AMM</h2><p className="muted">Connect a Testnet wallet to trade or provide liquidity.</p></section>;
+  const acct = wallet.address, off = busy || realValue;
+
+  return (
+    <section className="card">
+      <h2>DEX & AMM <span className="muted small">native order book + AMM pools · ledger-routed</span></h2>
+      <div className="form">
+        <AssetInput id="dex-a" label="Sell / asset 1" code={aCode} issuer={aIss} setCode={setACode} setIssuer={setAIss} />
+        <AssetInput id="dex-b" label="Buy / asset 2" code={bCode} issuer={bIss} setCode={setBCode} setIssuer={setBIss} />
+        <button className="ghost" disabled={!pairOk} onClick={() => { setACode(bCode); setAIss(bIss); setBCode(aCode); setBIss(aIss); }}>⇅ Flip</button>
+      </div>
+
+      <h3>Swap <span className="muted small">fill-or-kill: you get at least the minimum, or nothing happens</span></h3>
+      <div className="form">
+        <label>Sell amount ({lab(A)})<input id="swap-amount" value={amount} onChange={(e) => { setAmount(e.target.value.trim()); setQuote(null); }} placeholder="10" /></label>
+        <label>Max slippage %<input id="swap-slip" value={slip} onChange={(e) => setSlip(e.target.value.trim())} /></label>
+        <button id="swap-quote" className="ghost" disabled={!pairOk || !amount} onClick={async () => {
+          try { setQuote(await quoteSwap(ledger, A, B, amount)); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } }}>Quote</button>
+        <button id="swap-review" disabled={off || !pairOk || !amount} onClick={() => review("Swap",
+          () => prepareSwap(ledger, { account: acct, sell: A, amount, buy: B, slippagePct: Number(slip) || 1 }))}>Review swap</button>
+      </div>
+      {quote && <p className="small">≈ <b>{quote.expectedOut.toPrecision(8)} {lab(B)}</b> via {quote.via} · AMM {quote.ammOut.toPrecision(6)} · book {quote.bookOut.toPrecision(6)}
+        {quote.priceImpactPct !== undefined && <> · impact {quote.priceImpactPct.toFixed(2)}%</>}</p>}
+
+      <h3>Limit order <span className="muted small">rests on the book until filled or cancelled</span></h3>
+      <div className="form">
+        <label>Sell ({lab(A)})<input id="lim-sell" value={amount} onChange={(e) => setAmount(e.target.value.trim())} placeholder="10" /></label>
+        <label>For ({lab(B)})<input id="lim-buy" value={limitBuy} onChange={(e) => setLimitBuy(e.target.value.trim())} placeholder="100" /></label>
+        <button id="lim-review" disabled={off || !pairOk || !amount || !limitBuy} onClick={() => review("Place limit order",
+          () => prepareLimitOrder(ledger, { account: acct, sell: A, sellAmount: amount, buy: B, buyAmount: limitBuy }))}>Review order</button>
+      </div>
+      {book && (book.bids.length > 0 || book.asks.length > 0) && <p className="small muted">
+        Book {lab(B)}/{lab(A)}: best bid {book.bestBid?.toPrecision(6) ?? "—"} · best ask {book.bestAsk?.toPrecision(6) ?? "—"} {lab(A)} per {lab(B)}</p>}
+
+      <h3>Liquidity pool</h3>
+      {!pairOk ? <p className="muted small">Enter a pair to see its AMM pool.</p> : !pool ? <p className="muted small">{poolErr || "Loading…"}</p> : <>
+        <dl className="kv">
+          <dt>Reserves</dt><dd>{pool.amount1.toPrecision(8)} {lab(A)} · {pool.amount2.toPrecision(8)} {lab(B)}</dd>
+          <dt>Spot price</dt><dd>{pool.spotPrice.toPrecision(6)} {lab(B)} per {lab(A)}</dd>
+          <dt>Trading fee</dt><dd>{pool.tradingFeePct}%</dd>
+          <dt>LP supply</dt><dd>{pool.lpToken.value}</dd>
+          {pos && <><dt>Your position</dt><dd>{pos.lpTokens} LP ({pos.sharePct.toFixed(4)}%) ≈ {pos.worth1.toPrecision(6)} {lab(A)} + {pos.worth2.toPrecision(6)} {lab(B)}</dd></>}
+        </dl>
+        <div className="form">
+          <label>Deposit {lab(A)} (+ matching {lab(B)})<input id="amm-dep" value={depAmt} onChange={(e) => setDepAmt(e.target.value.trim())} placeholder="5" /></label>
+          <button id="amm-dep-review" disabled={off || !depAmt} onClick={() => review("Add liquidity",
+            () => prepareAmmDeposit(ledger, { account: acct, asset1: A, asset2: B, amount1: depAmt }))}>Review deposit</button>
+          <label>Withdraw LP tokens<input id="amm-wd" value={wdLp} onChange={(e) => setWdLp(e.target.value.trim())} placeholder={pos ? String(pos.lpTokens) : ""} /></label>
+          <button id="amm-wd-review" disabled={off || !wdLp} onClick={() => review("Remove liquidity",
+            () => prepareAmmWithdraw(ledger, { account: acct, asset1: A, asset2: B, lpTokens: wdLp }))}>Review withdraw</button>
+          <button id="amm-wd-all" className="ghost" disabled={off || !pos?.lpTokens} onClick={() => review("Withdraw everything",
+            () => prepareAmmWithdraw(ledger, { account: acct, asset1: A, asset2: B, all: true }))}>Withdraw all</button>
+        </div>
+      </>}
+
+      <h3>Your open orders</h3>
+      {offers.length === 0 ? <p className="muted small">None.</p> : <table className="tbl"><thead><tr><th>#</th><th>Sells</th><th>Wants</th><th>Price</th><th /></tr></thead>
+        <tbody>{offers.map((o) => <tr key={o.sequence}><td>{o.sequence}</td><td>{o.sells}</td><td>{o.wants}</td><td>{o.price.toPrecision(6)}</td>
+          <td className="actions"><button className="small ghost" disabled={off} onClick={() => review(`Cancel order #${o.sequence}`,
+            () => prepareOfferCancel(ledger, { account: acct, sequence: o.sequence }))}>Cancel</button></td></tr>)}</tbody></table>}
     </section>
   );
 }

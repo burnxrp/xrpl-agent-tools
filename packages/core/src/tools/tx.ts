@@ -1,5 +1,6 @@
 // Submission and ledger proof. "Done" means a VALIDATED ledger says tesSUCCESS — not that a node accepted it.
-import { hashes, convertHexToString } from "xrpl";
+import { hashes, convertHexToString, getBalanceChanges } from "xrpl";
+import { displayCurrency } from "../amounts.js";
 import type { Ledger } from "../ledger.js";
 import { explorerTx } from "../networks.js";
 
@@ -15,6 +16,8 @@ export interface LedgerProof {
   escrow?: { owner: string; sequence: number };
   /** For Payment: what actually arrived (from the ledger metadata, not the request). */
   delivered?: string;
+  /** How the sending account's balances changed (fees included) — e.g. what a swap actually traded. */
+  changes?: string[];
 }
 
 /** Submit an already-signed blob (signed by the user's wallet) and wait for validation. */
@@ -41,6 +44,11 @@ export async function verifyTx(ledger: Ledger, hash: string): Promise<LedgerProo
     hash, validated: !!r.validated, result, success: !!r.validated && result === "tesSUCCESS",
     ledgerIndex: r.ledger_index, type: tx.TransactionType, explorer: explorerTx(ledger.network, hash),
   };
+  if (r.validated && r.meta && typeof r.meta === "object") {
+    const mine = getBalanceChanges(r.meta as any).find((c: any) => c.account === tx.Account);
+    if (mine) proof.changes = mine.balances.map((b: any) =>
+      `${Number(b.value) > 0 ? "+" : ""}${Number(Number(b.value).toPrecision(12))} ${displayCurrency(b.currency)}`);
+  }
   if (tx.TransactionType === "Payment" && proof.success) {
     const d = r.meta?.delivered_amount;
     proof.delivered = typeof d === "string" ? `${Number(d) / 1e6} XRP`

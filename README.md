@@ -16,7 +16,7 @@ public XRPL nodes, and the result is enforced by ledger consensus.
 
 | Package | What it is |
 |---|---|
-| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
+| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, **DEX (order book, quotes, fill-or-kill swaps, limit orders) and AMM (pool info, deposit, withdraw)**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
 | `packages/mcp` | **Local MCP adapter** (stdio). Read tools answer directly. Every state-changing tool creates an **approval request** that the account owner signs in the console. The adapter never holds or sees a seed. |
 | `apps/console` | **XRPL Agent Console**. A static dashboard that connects straight to public XRPL nodes from the browser. Opened from an agent's review link, it also shows the agent's approval inbox. |
 
@@ -55,9 +55,14 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_escrow_create` | **xrpl.escrow.create** | needs human approval |
 | `xrpl_escrow_finish`, `xrpl_escrow_cancel` | xrpl.escrow.finish / .cancel | needs human approval |
 | `xrpl_payment_send` | **xrpl.payment.send** | needs human approval |
+| `xrpl_amm_info`, `xrpl_orderbook`, `xrpl_swap_quote`, `xrpl_offers_list` | xrpl.dex.* / xrpl.amm.info | read |
+| `xrpl_swap` | **xrpl.dex.swap** | needs human approval |
+| `xrpl_limit_order`, `xrpl_offer_cancel` | xrpl.dex.order / .cancel | needs human approval |
+| `xrpl_amm_deposit`, `xrpl_amm_withdraw` | xrpl.amm.deposit / .withdraw | needs human approval |
 | `xrpl_agent_account_create` | xrpl.agent.create | creates an agent account (key stays on this machine) |
 | `xrpl_agent_accounts`, `xrpl_agent_account_status` | xrpl.agent.status | read: balance (the hard cap), policy, last 24 h |
 | `xrpl_agent_pay` | **xrpl.agent.pay** | **autonomous**: no human step, within the owner's policy |
+| `xrpl_agent_swap` | xrpl.agent.swap | **autonomous**: the amount sold counts against the policy; slippage ≤ 5% |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
 | `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
@@ -81,6 +86,14 @@ Times can be `+90s`, `+10m`, `+2h`, `+1d`, an ISO date, or unix seconds. They're
 - **Issuer transfer fees:** these are written into `SendMax`, so the sender pays the fee and the recipient gets exactly the amount.
 
 Payments are **never partial**. The partial-payment flag is refused when the transaction is built and again during the intent check. The proof reports the **delivered** amount from the ledger metadata.
+
+### DEX & AMM
+
+- **Swaps are fill-or-kill sells.** You sell exactly the amount and receive at least the quoted output minus your slippage (default 1%). Otherwise the ledger returns `tecKILLED`, only the fee is spent, and no order is left resting. The ledger itself routes between the order book and the AMM pool. The quote shows both, so you can see which is better.
+- **Limit orders** rest on the book until filled or cancelled. `xrpl_offers_list` and `xrpl_offer_cancel` manage them.
+- **Liquidity is two-sided only.** A deposit adds `amount1` plus the matching amount of the other asset at the pool's current ratio. Withdrawals are proportional (an LP amount, or everything). Single-sided deposits and withdrawals are refused in the intent check, because they behave like a swap at the pool's price.
+- **The proof shows balance changes.** For trades, the validated proof lists exactly what moved in your account, for example `-5 XRP`, `+45.2 AGT`.
+- **If the pool moves after approval:** a deposit that would now need more of the second asset than the agent's request stated is refused. The agent must ask again.
 
 ### How an approval works
 
@@ -115,6 +128,15 @@ We deliberately don't use XRPL's transaction-type delegation as a spending limit
 
 ## Status
 
+**DEX & AMM are complete.** Verified on public Testnet with a real token and pool:
+- the quote picked the better source between the AMM and the book;
+- a swap with an impossible minimum was killed with only the fee spent;
+- deposit, withdraw and withdraw-all worked;
+- limit orders were placed and cancelled;
+- agent requests went through approval and were confirmed on the ledger;
+- a mismatched transaction reported for an approval was rejected;
+- autonomous agent swaps stayed within the per-tx and 24 h limits, unapproved tokens and >5% slippage were refused.
+
 **Agent accounts are complete.** Autonomous spending is capped by the ledger balance and an owner-signed policy. It was verified on Testnet with these results:
 - autonomous payments went through;
 - the per-payment and 24-hour limits held, including against 3 simultaneous payments;
@@ -127,4 +149,4 @@ We deliberately don't use XRPL's transaction-type delegation as a spending limit
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** issuer clawback, DEX/AMM, browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:** issuer clawback, browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).

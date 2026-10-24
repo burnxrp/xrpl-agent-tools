@@ -20,13 +20,13 @@ export const defaultPolicy = (owner: string): AgentPolicy =>
 
 export const assetKey = (a: Asset): string => (a === "XRP" ? "XRP" : `${a.currency}:${a.issuer}`);
 
-export interface SpendRequest { asset: Asset; amount: string; destination: string }
+export interface SpendRequest { asset: Asset; amount: string; destination?: string }   // no destination = a trade
 
 /** spentToday = amount of this asset already spent in the last 24 h (rolling). */
 export function checkSpend(policy: AgentPolicy, spentToday: number, req: SpendRequest): { ok: boolean; why?: string } {
   const amt = Number(req.amount);
   if (!(amt > 0)) return { ok: false, why: "amount must be positive" };
-  if (req.destination !== policy.owner && policy.allowedDestinations.length && !policy.allowedDestinations.includes(req.destination))
+  if (req.destination && req.destination !== policy.owner && policy.allowedDestinations.length && !policy.allowedDestinations.includes(req.destination))
     return { ok: false, why: "destination is not on this agent's allowlist" };
   const lim = req.asset === "XRP" ? policy.xrp : policy.tokens[assetKey(req.asset)];
   if (!lim) return { ok: false, why: `this agent may not spend ${assetKey(req.asset)} (not in its policy)` };

@@ -13,9 +13,11 @@ import { z } from "zod";
 import {
   Ledger, NETWORKS, type NetworkId, getAccount, getBalances, listEscrows, verifyTx,
   prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime, preparePayment,
+  getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder, listOffers, prepareOfferCancel,
+  prepareAmmDeposit, prepareAmmWithdraw, type Prepared, type Intent,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
-import { createAgent, agentStatus, agentPay, returnToOwner, listAgents } from "./agents.js";
+import { createAgent, agentStatus, agentPay, agentSwap, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
 const log = (...a: unknown[]) => console.error("[xrpl-agent]", ...a);   // stdout belongs to MCP
@@ -214,6 +216,108 @@ server.registerTool("xrpl_agent_request_funding", {
                                details: { ...p.details, reason: a.reason ?? "—" }, warnings: p.warnings });
     return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: ap.summary });
   } catch (e) { return fail(e); }
+});
+
+// ── DEX & AMM ──────────────────────────────────────────────────────────────────
+const ASSET2 = z.union([z.literal("XRP"), z.object({ currency: z.string().min(3).max(40), issuer: ADDR })])
+  .describe("\"XRP\" or { currency, issuer }");
+const NUM = z.string().regex(/^\d+(\.\d+)?$/);
+function queue(tool: Intent["tool"], input: any, p: Prepared<any>) {
+  const ap = approvals.add({ network, intent: { tool, input } as Intent, summary: p.summary, details: p.details, warnings: p.warnings });
+  log("approval requested:", ap.id, p.summary);
+  return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary, warnings: p.warnings,
+                next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
+}
+
+server.registerTool("xrpl_amm_info", {
+  title: "AMM pool", description: "An AMM pool's reserves, trading fee, spot price and LP supply — plus an account's LP position if given.",
+  inputSchema: { asset1: ASSET2, asset2: ASSET2, account: ADDR.optional() }, annotations: READ,
+}, async (a) => {
+  try {
+    const p = await getAmm(ledger, a.asset1, a.asset2);
+    const { reserve: _r, ...pool } = p;
+    return json({ ...pool, position: a.account ? await getAmmPosition(ledger, a.account, p) : undefined });
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_orderbook", {
+  title: "Order book", description: "Best bids/asks for base/quote on the XRPL DEX (prices in quote per 1 base).",
+  inputSchema: { base: ASSET2, quote: ASSET2, limit: z.number().int().min(1).max(50).optional() }, annotations: READ,
+}, async (a) => { try { return json(await getOrderBook(ledger, a.base, a.quote, a.limit ?? 10)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_swap_quote", {
+  title: "Swap quote", description: "Estimate what selling an amount returns, from the AMM pool and the order book (no transaction).",
+  inputSchema: { sell: ASSET2, amount: NUM, buy: ASSET2 }, annotations: READ,
+}, async (a) => { try { return json(await quoteSwap(ledger, a.sell, a.buy, a.amount)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_swap", {
+  title: "Swap (needs human approval)",
+  description: "Request a swap (tool xrpl.dex.swap): sell exactly `amount`, receive at least the quote minus slippage — Fill-or-Kill, so it " +
+    "fills completely or nothing happens and no order is left resting. The ledger routes through the order book and AMM. Queued for approval.",
+  inputSchema: { account: ADDR, sell: ASSET2, amount: NUM, buy: ASSET2, slippage_pct: z.number().min(0).max(20).optional() }, annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const p = await prepareSwap(ledger, { account: a.account, sell: a.sell, amount: a.amount, buy: a.buy, slippagePct: a.slippage_pct });
+    return queue("swap", { account: a.account, sell: a.sell, amount: a.amount, buy: a.buy, minOut: p.minOut }, p);
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_limit_order", {
+  title: "Limit order (needs human approval)",
+  description: "Request a resting order: sell `sell_amount` of one asset for `buy_amount` of another. Stays on the book until filled or cancelled.",
+  inputSchema: { account: ADDR, sell: ASSET2, sell_amount: NUM, buy: ASSET2, buy_amount: NUM, passive: z.boolean().optional() }, annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const input = { account: a.account, sell: a.sell, sellAmount: a.sell_amount, buy: a.buy, buyAmount: a.buy_amount, passive: a.passive };
+    return queue("limit_order", input, await prepareLimitOrder(ledger, input));
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_offers_list", {
+  title: "Open orders", description: "An account's resting orders on the XRPL DEX.",
+  inputSchema: { account: ADDR }, annotations: READ,
+}, async ({ account }) => { try { return json(await listOffers(ledger, account)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_offer_cancel", {
+  title: "Cancel order (needs human approval)", description: "Request cancelling one of the account's resting orders (by sequence from xrpl_offers_list).",
+  inputSchema: { account: ADDR, sequence: z.number().int().positive() }, annotations: ACT,
+}, async (a) => { try { guardNetwork(); return queue("offer_cancel", a, await prepareOfferCancel(ledger, a)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_amm_deposit", {
+  title: "Add liquidity (needs human approval)",
+  description: "Request a two-asset AMM deposit: `amount1` of asset1 plus the matching amount of asset2 at the pool's current ratio.",
+  inputSchema: { account: ADDR, asset1: ASSET2, asset2: ASSET2, amount1: NUM }, annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const p = await prepareAmmDeposit(ledger, a);
+    return queue("amm_deposit", { ...a, amount2: p.amount2 }, p);
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_amm_withdraw", {
+  title: "Remove liquidity (needs human approval)",
+  description: "Request a proportional AMM withdrawal (both assets back): `lp_tokens`, or `all: true`.",
+  inputSchema: { account: ADDR, asset1: ASSET2, asset2: ASSET2, lp_tokens: NUM.optional(), all: z.boolean().optional() }, annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const input = { account: a.account, asset1: a.asset1, asset2: a.asset2, lpTokens: a.lp_tokens, all: a.all };
+    return queue("amm_withdraw", input, await prepareAmmWithdraw(ledger, input));
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_agent_swap", {
+  title: "Swap from the agent account (autonomous)",
+  description: "Fill-or-kill swap from an agent account, signed automatically if the amount sold fits the owner's policy for that asset. " +
+    "Slippage is capped at 5%. Returns the validated proof with the balance changes.",
+  inputSchema: { from: ADDR, sell: ASSET2, amount: NUM, buy: ASSET2, slippage_pct: z.number().min(0).max(5).optional() },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+}, async (a) => {
+  try { guardNetwork(); return json(await agentSwap(ledger, a.from, { sell: a.sell, amount: a.amount, buy: a.buy, slippagePct: a.slippage_pct })); }
+  catch (e) { return fail(e); }
 });
 
 server.registerTool("xrpl_approval_status", {
