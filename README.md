@@ -332,3 +332,7 @@ The extensions themselves still need a hands-on test in a browser that has them 
 **Next:**
 - a hands-on mainnet test with a real extension wallet;
 - a Mastercard AP4M voucher signer once early access is granted.
+
+## License
+
+[MIT](LICENSE)
