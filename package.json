@@ -1,0 +1,11 @@
+{
+  "name": "xrpl-agent-tools",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Ledger-native XRPL tools for AI agents (MCP) and humans (wallet dashboard). No proprietary backend.",
+  "workspaces": ["packages/core", "packages/mcp", "apps/console"],
+  "scripts": {
+    "build": "npm run build -w @xrpl-agent/core && npm run build -w @xrpl-agent/mcp && npm run build -w @xrpl-agent/console",
+    "test:escrow": "npm run e2e -w @xrpl-agent/core"
+  }
+}

@@ -1,0 +1,30 @@
+// What a human approves is an INTENT (tool + arguments), not a byte string: transactions expire within ~a minute
+// (LastLedgerSequence), so the wallet re-prepares at approval time. matchesIntent() proves afterwards that what
+// actually landed on the ledger is exactly what was approved.
+import { xrpToDrops } from "xrpl";
+import type { EscrowCreateInput, EscrowRef } from "./tools/escrow.js";
+
+export type Intent =
+  | { tool: "escrow_create"; input: EscrowCreateInput & { finishAfterRipple?: number; cancelAfterRipple?: number } }
+  | { tool: "escrow_finish"; input: EscrowRef & { account: string } }
+  | { tool: "escrow_cancel"; input: EscrowRef & { account: string } };
+
+export function matchesIntent(intent: Intent, tx: Record<string, any>): { ok: boolean; why?: string } {
+  const must = (cond: boolean, why: string) => (cond ? null : why);
+  const i: any = intent.input;
+  const checks: (string | null)[] =
+    intent.tool === "escrow_create" ? [
+      must(tx.TransactionType === "EscrowCreate", "not an EscrowCreate"),
+      must(tx.Account === i.account, "different sender"),
+      must(tx.Destination === i.destination, "different destination"),
+      must(String(tx.Amount) === xrpToDrops(i.amount), "different amount"),
+      must(i.finishAfterRipple === undefined || tx.FinishAfter === i.finishAfterRipple, "different release time"),
+      must(i.cancelAfterRipple === undefined || tx.CancelAfter === i.cancelAfterRipple, "different cancel time"),
+    ] : [
+      must(tx.TransactionType === (intent.tool === "escrow_finish" ? "EscrowFinish" : "EscrowCancel"), "wrong transaction type"),
+      must(tx.Account === i.account, "different signer"),
+      must(tx.Owner === i.owner && Number(tx.OfferSequence) === Number(i.sequence), "different escrow"),
+    ];
+  const why = checks.find((c) => c);
+  return why ? { ok: false, why } : { ok: true };
+}
