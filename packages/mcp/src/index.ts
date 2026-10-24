@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   Ledger, NETWORKS, type NetworkId, getAccount, getBalances, listEscrows, verifyTx,
-  prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime,
+  prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime, preparePayment,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
@@ -114,6 +114,33 @@ for (const kind of ["finish", "cancel"] as const) {
     } catch (e) { return fail(e); }
   });
 }
+
+server.registerTool("xrpl_payment_send", {
+  title: "Send a payment (needs human approval)",
+  description: "Request a native Payment of XRP or an issued token (tool xrpl.payment.send). Checked against the live ledger first " +
+    "(activation, trustlines, balances, issuer transfer fees, destination tags) and then queued for the sender to approve and sign " +
+    "in the local console. Never a partial payment: the recipient gets exactly the amount or nothing. Poll xrpl_approval_status.",
+  inputSchema: {
+    account: ADDR.describe("the paying wallet, which must approve"),
+    destination: ADDR,
+    amount: z.string().regex(/^\d+(\.\d+)?$/).describe("decimal amount, e.g. \"12.5\""),
+    asset: z.union([z.literal("XRP"), z.object({ currency: z.string().min(3).max(40), issuer: ADDR })])
+      .describe("\"XRP\" or { currency, issuer } for an issued token"),
+    destination_tag: z.number().int().nonnegative().optional(),
+    memo: z.string().max(200).optional(),
+  }, annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const input = { account: a.account, destination: a.destination, amount: a.amount, asset: a.asset,
+                    destinationTag: a.destination_tag, memo: a.memo };
+    const p = await preparePayment(ledger, input);
+    const ap = approvals.add({ network, intent: { tool: "payment", input }, summary: p.summary, details: p.details, warnings: p.warnings });
+    log("approval requested:", ap.id, p.summary);
+    return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary,
+                  warnings: p.warnings, next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
+  } catch (e) { return fail(e); }
+});
 
 server.registerTool("xrpl_approval_status", {
   title: "Approval status", description: "Status of an approval request: pending, rejected, confirmed (with validated ledger proof) or failed.",

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Wallet, Client } from "xrpl";
 import {
   Ledger, NETWORKS, type NetworkId, type AccountInfo, type EscrowEntry, type LedgerProof, type Prepared, type Intent,
-  getAccount, listEscrows, prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, submitSigned, verifyTx,
+  getAccount, getBalances, listEscrows, prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, submitSigned, verifyTx,
+  preparePayment, type TokenBalance,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
 import { forgetWallet, loadWallet, saveSeed, sign, type DevWallet } from "./wallet";
@@ -11,7 +12,7 @@ type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof";
 const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "account", name: "Account", sub: "Balances & permissions", ready: true },
   { id: "escrow", name: "Escrow", sub: "Create · Finish · Cancel", ready: true },
-  { id: "payments", name: "Payments", sub: "XRP & issued tokens", ready: false },
+  { id: "payments", name: "Payments", sub: "XRP & issued tokens", ready: true },
   { id: "clawback", name: "Clawback", sub: "Issuer-only recovery", ready: false },
   { id: "dex", name: "DEX & AMM", sub: "Trading & liquidity", ready: false },
   { id: "proof", name: "Ledger Proof", sub: "Validated transactions", ready: true },
@@ -88,6 +89,7 @@ export default function App() {
 
       {tool === "account" && <AccountTool acct={acct} network={network} />}
       {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
+      {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
       {tool === "proof" && <ProofTool ledger={ledger} />}
 
       {review && <ReviewModal ledger={ledger} review={review} onClose={() => setReview(null)}
@@ -207,6 +209,41 @@ function EscrowTool({ ledger, wallet, realValue, onReview, onMsg }: {
   );
 }
 
+function PaymentsTool({ ledger, wallet, realValue, onReview, onMsg }: {
+  ledger: Ledger; wallet: DevWallet | null; realValue: boolean; onReview: (r: Review) => void; onMsg: (ok: boolean, t: string) => void;
+}) {
+  const [dest, setDest] = useState(""), [amount, setAmount] = useState(""), [tag, setTag] = useState(""), [memo, setMemo] = useState("");
+  const [tokens, setTokens] = useState<TokenBalance[]>([]), [asset, setAsset] = useState("XRP"), [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!wallet) return;
+    getBalances(ledger, wallet.address).then((b) => setTokens(b.tokens)).catch(() => setTokens([]));
+  }, [ledger, wallet]);
+  if (!wallet) return <section className="card"><h2>Payments</h2><p className="muted">Connect a Testnet wallet to send payments.</p></section>;
+  const chosen = asset === "XRP" ? "XRP" as const : (() => { const t = tokens[Number(asset)]; return { currency: t.currency, issuer: t.issuer }; })();
+  return (
+    <section className="card">
+      <h2>Payments <span className="muted small">native Payment · exact delivery (never partial)</span></h2>
+      <div className="form">
+        <label>Recipient<input id="pay-dest" value={dest} onChange={(e) => setDest(e.target.value.trim())} placeholder="r…" /></label>
+        <label>Asset<select id="pay-asset" value={asset} onChange={(e) => setAsset(e.target.value)}>
+          <option value="XRP">XRP</option>
+          {tokens.map((t, k) => <option key={k} value={k}>{t.currency} · {t.issuer.slice(0, 8)}… (bal {t.balance})</option>)}
+        </select></label>
+        <label>Amount<input id="pay-amount" value={amount} onChange={(e) => setAmount(e.target.value.trim())} placeholder="12.5" /></label>
+        <label>Destination tag<input id="pay-tag" value={tag} onChange={(e) => setTag(e.target.value.replace(/\D/g, ""))} placeholder="optional" /></label>
+        <label>Memo<input id="pay-memo" value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="optional" maxLength={200} /></label>
+        <button id="pay-review" disabled={busy || realValue || !dest || !amount} onClick={async () => {
+          setBusy(true);
+          try {
+            onReview({ title: "Send payment", prepared: await preparePayment(ledger, { account: wallet.address, destination: dest, amount,
+              asset: chosen, destinationTag: tag ? Number(tag) : undefined, memo: memo || undefined }) });
+          } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+        }}>Review payment</button>
+      </div>
+    </section>
+  );
+}
+
 function ProofTool({ ledger }: { ledger: Ledger }) {
   const [hash, setHash] = useState(""), [p, setP] = useState<LedgerProof | null>(null), [err, setErr] = useState("");
   return (
@@ -230,6 +267,7 @@ function ProofView({ p }: { p: LedgerProof }) {
       <dt>Type</dt><dd>{p.type}</dd>
       <dt>Ledger</dt><dd>{p.ledgerIndex}</dd>
       {p.escrow && <><dt>Escrow</dt><dd className="mono">{p.escrow.owner}#{p.escrow.sequence}</dd></>}
+      {p.delivered && <><dt>Delivered</dt><dd>{p.delivered}</dd></>}
       <dt>Hash</dt><dd className="mono"><a href={p.explorer} target="_blank" rel="noreferrer">{p.hash}</a></dd>
     </dl>
   );
@@ -284,7 +322,8 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
     if (wallet.address !== i.account) return onMsg(false, `This request must be signed by ${i.account} — connect that wallet`);
     try {
       // Re-prepare fresh from the approved intent (transactions expire within ~a minute; intents don't).
-      const prepared = a.intent.tool === "escrow_create"
+      const prepared = a.intent.tool === "payment" ? await preparePayment(ledger, i)
+        : a.intent.tool === "escrow_create"
         ? await prepareEscrowCreate(ledger, { account: i.account, destination: i.destination, amount: i.amount,
             finishAfter: i.finishAfter, cancelAfter: i.cancelAfter, destinationTag: i.destinationTag, memo: i.memo })
         : a.intent.tool === "escrow_finish" ? await prepareEscrowFinish(ledger, i) : await prepareEscrowCancel(ledger, i);

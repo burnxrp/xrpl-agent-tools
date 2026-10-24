@@ -1,5 +1,5 @@
 // Submission and ledger proof. "Done" means a VALIDATED ledger says tesSUCCESS — not that a node accepted it.
-import { hashes } from "xrpl";
+import { hashes, convertHexToString } from "xrpl";
 import type { Ledger } from "../ledger.js";
 import { explorerTx } from "../networks.js";
 
@@ -13,6 +13,8 @@ export interface LedgerProof {
   explorer: string;
   /** For EscrowCreate: the reference needed to finish/cancel it later. */
   escrow?: { owner: string; sequence: number };
+  /** For Payment: what actually arrived (from the ledger metadata, not the request). */
+  delivered?: string;
 }
 
 /** Submit an already-signed blob (signed by the user's wallet) and wait for validation. */
@@ -39,6 +41,11 @@ export async function verifyTx(ledger: Ledger, hash: string): Promise<LedgerProo
     hash, validated: !!r.validated, result, success: !!r.validated && result === "tesSUCCESS",
     ledgerIndex: r.ledger_index, type: tx.TransactionType, explorer: explorerTx(ledger.network, hash),
   };
+  if (tx.TransactionType === "Payment" && proof.success) {
+    const d = r.meta?.delivered_amount;
+    proof.delivered = typeof d === "string" ? `${Number(d) / 1e6} XRP`
+      : d ? `${d.value} ${d.currency.length === 40 ? convertHexToString(d.currency).replace(/\0+$/, "") : d.currency}` : undefined;
+  }
   if (tx.TransactionType === "EscrowCreate" && proof.success) {
     proof.escrow = { owner: tx.Account, sequence: Number(tx.Sequence || tx.TicketSequence) };
   }

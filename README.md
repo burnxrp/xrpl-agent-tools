@@ -16,7 +16,7 @@ public XRPL nodes, and the result is enforced by ledger consensus.
 
 | Package | What it is |
 |---|---|
-| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), signed submission, and ledger proof. "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
+| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
 | `packages/mcp` | **Local MCP adapter** (stdio). Read tools answer directly. Every state-changing tool creates an **approval request** that the account owner signs in the console. The adapter never holds or sees a seed. |
 | `apps/console` | **XRPL Agent Console**. A static dashboard that connects straight to public XRPL nodes from the browser. Opened from an agent's review link, it also shows the agent's approval inbox. |
 
@@ -25,7 +25,7 @@ public XRPL nodes, and the result is enforced by ledger consensus.
 ```bash
 npm install
 npm run build
-npm run test:escrow                                              # full native-escrow run on public Testnet
+npm run test:escrow                                              # escrow + payments runs on public Testnet
 XRPL_ENDPOINTS=wss://testnet.xrpl-labs.com npm run test:escrow   # same run through a different operator
 ```
 
@@ -54,6 +54,7 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_escrow_list` | xrpl.escrow.list | read |
 | `xrpl_escrow_create` | **xrpl.escrow.create** | needs human approval |
 | `xrpl_escrow_finish`, `xrpl_escrow_cancel` | xrpl.escrow.finish / .cancel | needs human approval |
+| `xrpl_payment_send` | **xrpl.payment.send** | needs human approval |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
 | `xrpl_tx_verify` | xrpl.ledger.proof | read |
 
@@ -65,6 +66,16 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 ```
 
 Times can be `+90s`, `+10m`, `+2h`, `+1d`, an ISO date, or unix seconds. They're fixed to exact moments when the request is made.
+
+`xrpl_payment_send` takes `{ "account", "destination", "amount": "12.5", "asset": "XRP" | { "currency": "USD", "issuer": "r…" } }`. Before you sign, it checks:
+
+- **Activation:** sending XRP to a new address must cover the base reserve.
+- **Trustlines:** the recipient must have a trustline for the token, with enough limit, and it must not be frozen.
+- **Balances:** you must hold enough, counting the reserve.
+- **Destination tags:** required tags must be present.
+- **Issuer transfer fees:** these are written into `SendMax`, so the sender pays the fee and the recipient gets exactly the amount.
+
+Payments are **never partial**. The partial-payment flag is refused when the transaction is built and again during the intent check. The proof reports the **delivered** amount from the ledger metadata.
 
 ### How an approval works
 
@@ -83,6 +94,8 @@ Times can be `+90s`, `+10m`, `+2h`, `+1d`, an ISO date, or unix seconds. They're
 
 ## Status
 
+**Payments are complete**: XRP and issued tokens for agents and humans. They were verified on public Testnet, including a token with a 1% transfer fee.
+
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** XRP and issued-token payments, issuer clawback, DEX/AMM, browser-extension wallets (GemWallet / Crossmark), and agent accounts for bounded autonomous spending.
+**Next:** issuer clawback, DEX/AMM, browser-extension wallets (GemWallet / Crossmark), and agent accounts for bounded autonomous spending.

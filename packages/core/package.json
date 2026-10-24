@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "scripts": { "build": "tsc -p .", "e2e": "tsx test/escrow.e2e.ts" },
+  "scripts": { "build": "tsc -p .", "e2e": "tsx test/escrow.e2e.ts && tsx test/payment.e2e.ts", "e2e:payment": "tsx test/payment.e2e.ts" },
   "dependencies": { "xrpl": "5.3.0", "zod": "4.6.5" },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.20.6", "@types/node": "22.10.2" }
 }
