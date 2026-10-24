@@ -3,7 +3,7 @@
 // bound to the invoice via InvoiceID) and retries with PAYMENT-SIGNATURE; the seller's facilitator verifies every MUST
 // rule, settles on the ledger and returns PAYMENT-RESPONSE. Everything here runs against public XRPL nodes — the
 // facilitator is ours (self-hosted), not a central processor.
-// Supported: assetTransferMethod "sequence" (the spec default) and the default "authorization" payment flow.
+// Supported: assetTransferMethods "sequence" (spec default) and "ticketSequence", and the default "authorization" flow.
 import { decode, validate, verifySignature, hashes, xrpToDrops, dropsToXrp, isValidClassicAddress, type Payment } from "xrpl";
 import { deriveAddress } from "ripple-keypairs";
 import type { Ledger } from "./ledger.js";
@@ -68,6 +68,7 @@ export function cmpDecimal(a: string, b: string): number {
 export interface RequirementInput {
   network: NetworkId; payTo: string; amount: string /* human units: "0.25" XRP or "10.5" tokens */; asset: Asset;
   invoiceId?: string; destinationTag?: number; maxTimeoutSeconds?: number;
+  assetTransferMethod?: "sequence" | "ticketSequence";   // default "sequence"
 }
 export function x402Requirement(i: RequirementInput): X402Requirements {
   if (!isValidClassicAddress(i.payTo)) throw new Error("payTo must be a classic XRPL address");
@@ -77,7 +78,7 @@ export function x402Requirement(i: RequirementInput): X402Requirements {
     scheme: "exact", network: caip2(i.network), payTo: i.payTo, maxTimeoutSeconds: i.maxTimeoutSeconds ?? 300,
     asset: xrp ? "XRP" : currencyCode((i.asset as { currency: string }).currency),
     amount: xrp ? xrpToDrops(i.amount) : i.amount,
-    extra: { areFeesSponsored: false, assetTransferMethod: "sequence",
+    extra: { areFeesSponsored: false, assetTransferMethod: i.assetTransferMethod ?? "sequence",
              ...(xrp ? {} : { issuer: (i.asset as { issuer: string }).issuer }),
              ...(i.invoiceId !== undefined ? { invoiceId: i.invoiceId } : {}),
              ...(i.destinationTag !== undefined ? { destinationTag: i.destinationTag } : {}) },
@@ -89,30 +90,40 @@ export const requirementValue = (r: X402Requirements): string => (r.asset === "X
 
 // ── buyer ─────────────────────────────────────────────────────────────────────
 /** The first `accepts` entry this client can pay on `network`, or an error listing why none fit. */
-export function selectRequirement(pr: X402PaymentRequired, network: NetworkId): X402Requirements {
-  const why: string[] = [];
+export const transferMethod = (r: X402Requirements): "sequence" | "ticketSequence" | string => r.extra?.assetTransferMethod ?? "sequence";
+
+/** `prefer` picks between otherwise-equal options when the seller offers both methods; `tickets: false` refuses ticket-only offers. */
+export function selectRequirement(pr: X402PaymentRequired, network: NetworkId,
+                                  opts: { tickets?: boolean; prefer?: "sequence" | "ticketSequence" } = {}): X402Requirements {
+  const why: string[] = [], ok: X402Requirements[] = [];
+  const tickets = opts.tickets ?? true;
   for (const r of pr.accepts ?? []) {
     const e = r?.extra ?? ({} as X402Requirements["extra"]);
     if (r?.scheme !== "exact") { why.push(`${r?.scheme}: unsupported scheme`); continue; }
     if (r.network !== caip2(network)) { why.push(`${r.network}: not ${caip2(network)}`); continue; }
     if (e.areFeesSponsored !== false) { why.push("areFeesSponsored must be false"); continue; }
-    if (e.assetTransferMethod && e.assetTransferMethod !== "sequence") { why.push(`${e.assetTransferMethod}: unsupported transfer method`); continue; }
+    const m = e.assetTransferMethod ?? "sequence";
+    if (m !== "sequence" && !(m === "ticketSequence" && tickets)) { why.push(`${m}: unsupported transfer method`); continue; }
     if (e.paymentFlow && e.paymentFlow !== "authorization") { why.push(`${e.paymentFlow}: unsupported payment flow`); continue; }
     if (!isValidClassicAddress(r.payTo)) { why.push("invalid payTo"); continue; }
     if (r.asset === "XRP" ? !/^\d+$/.test(r.amount) || r.amount === "0"
         : !(isValidClassicAddress(String(e.issuer)) && /^\d+(\.\d+)?$/.test(r.amount) && cmpDecimal(r.amount, "0") > 0)) { why.push("invalid amount/asset"); continue; }
-    return r;
+    ok.push(r);
   }
+  if (ok.length) return ok.find((r) => transferMethod(r) === (opts.prefer ?? "sequence")) ?? ok[0];
   throw new Error(`no payable x402 option (${why.join("; ") || "empty accepts"})`);
 }
 
 /** Build the exact Payment for a requirement (autofilled, unsigned). */
-export async function prepareX402Payment(ledger: Ledger, account: string, r: X402Requirements): Promise<Prepared<Payment>> {
+export async function prepareX402Payment(ledger: Ledger, account: string, r: X402Requirements, opts: { ticket?: number } = {}): Promise<Prepared<Payment>> {
+  if (transferMethod(r) === "ticketSequence" && opts.ticket === undefined) throw new Error("this offer requires a ticket (ticketSequence)");
+  if (transferMethod(r) !== "ticketSequence" && opts.ticket !== undefined) throw new Error("this offer uses the account sequence, not a ticket");
   const p = await preparePayment(ledger, { account, destination: r.payTo, amount: requirementValue(r), asset: requirementAsset(r),
                                            destinationTag: r.extra.destinationTag });
   const tx: any = { ...p.tx };
   if (r.asset !== "XRP" && !tx.SendMax) tx.SendMax = { ...tx.Amount };          // required for IOUs (same currency/issuer)
   if (r.extra.invoiceId !== undefined) tx.InvoiceID = await invoiceHash(String(r.extra.invoiceId));
+  if (opts.ticket !== undefined) { tx.Sequence = 0; tx.TicketSequence = opts.ticket; }
   const validated = Number((await ledger.request<any>({ command: "ledger", ledger_index: "validated" })).ledger_index);
   tx.LastLedgerSequence = Math.min(Number(tx.LastLedgerSequence), validated + Math.ceil(r.maxTimeoutSeconds / 5) + 2);
   validate(tx);
@@ -132,37 +143,87 @@ export interface X402FetchResult {
 }
 
 /** fetch() that pays a 402 once via `pay` (which returns the signed blob, or throws to decline). */
-export async function x402Fetch(url: string, init: RequestInit & { headers?: Record<string, string> }, opts: {
-  network: NetworkId; pay?: (r: X402Requirements, pr: X402PaymentRequired) => Promise<string>; fetchImpl?: typeof fetch;
-}): Promise<X402FetchResult> {
+type Init = RequestInit & { headers?: Record<string, string> };
+const pack = async (res: Response) => ({ status: res.status, headers: Object.fromEntries(res.headers.entries()), body: await res.text() });
+
+/** Step 1: request the resource; returns the normal response, or the parsed x402 challenge. */
+export async function x402Challenge(url: string, init: Init, fetchImpl: typeof fetch = fetch): Promise<X402FetchResult> {
   if (!/^https?:\/\//i.test(url)) throw new Error("only http(s) URLs");
-  const f = opts.fetchImpl ?? fetch;
-  const pack = async (res: Response) => ({ status: res.status, headers: Object.fromEntries(res.headers.entries()), body: await res.text() });
-  const r1 = await f(url, init);
-  if (r1.status !== 402) return pack(r1);
+  const r1 = await fetchImpl(url, init);
   const first = await pack(r1);
+  if (r1.status !== 402) return first;
   const h = r1.headers.get(HEADER_REQUIRED);
   let pr: X402PaymentRequired | null = null;
   try { pr = h ? fromB64json(h) : JSON.parse(first.body); } catch { /* not x402 */ }
   if (!pr || pr.x402Version !== 2 || !Array.isArray(pr.accepts)) throw new Error("402 without an x402 v2 PAYMENT-REQUIRED");
-  if (!opts.pay) return { ...first, paymentRequired: pr };
-  const req = selectRequirement(pr, opts.network);
-  const blob = await opts.pay(req, pr);
-  const r2 = await f(url, { ...init, headers: { ...(init.headers ?? {}), [HEADER_SIGNATURE]: b64json(x402Payload(req, blob, pr.resource)) } });
+  return { ...first, paymentRequired: pr };
+}
+
+/** Step 2: retry with a signed payment for `req`. */
+export async function x402Redeem(url: string, init: Init, req: X402Requirements, signedTxBlob: string, resource?: X402ResourceInfo,
+                                 fetchImpl: typeof fetch = fetch): Promise<X402FetchResult> {
+  const r2 = await fetchImpl(url, { ...init, headers: { ...(init.headers ?? {}), [HEADER_SIGNATURE]: b64json(x402Payload(req, signedTxBlob, resource)) } });
   const out = await pack(r2);
   const sr = r2.headers.get(HEADER_RESPONSE);
   let settlement: X402SettleResponse | undefined;
   try { settlement = sr ? fromB64json(sr) : undefined; } catch { /* ignore */ }
-  return { ...out, paid: { requirement: req, txHash: hashes.hashSignedTx(blob), settlement } };
+  return { ...out, paid: { requirement: req, txHash: hashes.hashSignedTx(signedTxBlob), settlement } };
+}
+
+/** fetch() that pays a 402 once via `pay` (which returns the signed blob, or throws to decline). */
+export async function x402Fetch(url: string, init: Init, opts: {
+  network: NetworkId; pay?: (r: X402Requirements, pr: X402PaymentRequired) => Promise<string>; fetchImpl?: typeof fetch;
+  tickets?: boolean; prefer?: "sequence" | "ticketSequence";
+}): Promise<X402FetchResult> {
+  const first = await x402Challenge(url, init, opts.fetchImpl);
+  if (!first.paymentRequired || !opts.pay) return first;
+  const pr = first.paymentRequired;
+  const req = selectRequirement(pr, opts.network, { tickets: opts.tickets, prefer: opts.prefer });
+  return x402Redeem(url, init, req, await opts.pay(req, pr), pr.resource, opts.fetchImpl);
+}
+
+// ── tickets (for assetTransferMethod "ticketSequence") ────────────────────────
+/** The account's unused Tickets (ticket sequence numbers), ascending. */
+export async function listTickets(ledger: Ledger, account: string): Promise<number[]> {
+  const out: number[] = [];
+  let marker: unknown;
+  do {
+    const r = await ledger.request<any>({ command: "account_objects", account, type: "ticket", ledger_index: "validated", limit: 400, ...(marker ? { marker } : {}) });
+    for (const o of r.account_objects ?? []) out.push(Number(o.TicketSequence));
+    marker = r.marker;
+  } while (marker);
+  return out.sort((a, b) => a - b);
+}
+
+/** TicketCreate for `count` tickets (each locks the owner reserve until used). */
+export async function prepareTicketCreate(ledger: Ledger, input: { account: string; count: number }): Promise<Prepared<any>> {
+  if (!Number.isInteger(input.count) || input.count < 1 || input.count > 250) throw new Error("count must be 1–250");
+  const have = (await listTickets(ledger, input.account)).length;
+  if (have + input.count > 250) throw new Error(`an account can hold at most 250 tickets (has ${have})`);
+  const c = await ledger.client();
+  const tx = await c.autofill({ TransactionType: "TicketCreate", Account: input.account, TicketCount: input.count } as any);
+  validate(tx as any);
+  return { network: ledger.network, tx, summary: `Create ${input.count} ticket(s) for ${input.account}`,
+           details: { tickets: String(input.count), note: "each ticket locks the owner reserve until it's used or released" }, warnings: [] };
+}
+
+/** Release a ticket: a no-op AccountSet that consumes it, freeing its reserve. */
+export async function prepareTicketRelease(ledger: Ledger, input: { account: string; ticket: number }): Promise<Prepared<any>> {
+  const c = await ledger.client();
+  const tx = await c.autofill({ TransactionType: "AccountSet", Account: input.account, Sequence: 0, TicketSequence: input.ticket } as any);
+  (tx as any).Sequence = 0; (tx as any).TicketSequence = input.ticket;
+  validate(tx as any);
+  return { network: ledger.network, tx, summary: `Release ticket ${input.ticket}`, details: { ticket: String(input.ticket) }, warnings: [] };
 }
 
 // ── facilitator (self-hosted): verify + settle ────────────────────────────────
 const PARTIAL = 0x00020000;
 
 export class X402Facilitator {
-  private readonly pending = new Map<string, number>();
+  private readonly pending = new Map<string, number>();         // tx hash → LastLedgerSequence (dedup until it can't land)
+  private readonly pendingTickets = new Map<string, number>();  // "account:ticket" → LastLedgerSequence
   /** How the last verify checked "would it succeed now": the node's `simulate`, or targeted checks (node can't simulate). */
-  lastCheck: "simulate" | "targeted" | undefined;   // tx hash → LastLedgerSequence (dedup until it can't land)
+  lastCheck: "simulate" | "targeted" | undefined;
   constructor(private readonly ledger: Ledger, private readonly opts: { maxFeeDrops?: number } = {}) {}
 
   get network(): string { return caip2(this.ledger.network); }
@@ -180,7 +241,7 @@ export class X402Facilitator {
     if (re.areFeesSponsored !== false || ae.areFeesSponsored !== false) return no("fees_sponsored_not_supported");
     const method = ae.assetTransferMethod ?? re.assetTransferMethod ?? "sequence";
     if (re.assetTransferMethod && method !== re.assetTransferMethod) return no("asset_transfer_method_mismatch");
-    if (method !== "sequence") return no("unsupported_asset_transfer_method");
+    if (method !== "sequence" && method !== "ticketSequence") return no("unsupported_asset_transfer_method");
     if (req.asset !== "XRP" && ae.issuer !== re.issuer) return no("issuer_mismatch");
     if (re.invoiceId !== undefined && String(ae.invoiceId) !== String(re.invoiceId)) return no("invoice_mismatch");
     if (re.destinationTag !== undefined && Number(ae.destinationTag) !== Number(re.destinationTag)) return no("destination_tag_mismatch");
@@ -217,11 +278,17 @@ export class X402Facilitator {
     const validated = Number((await this.ledger.request<any>({ command: "ledger", ledger_index: "validated" })).ledger_index);
     if (Number(tx.LastLedgerSequence) > validated + Math.ceil(req.maxTimeoutSeconds / 5) + 2) return no("last_ledger_sequence_too_far", payer);
     if (Number(tx.LastLedgerSequence) <= validated) return no("expired", payer);
-    if (tx.TicketSequence !== undefined) return no("ticket_not_allowed_for_sequence_method", payer);
     let acct: any;
     try { acct = (await this.ledger.request<any>({ command: "account_info", account: payer, ledger_index: "current" })).account_data; }
     catch { return no("payer_not_found", payer); }
-    if (Number(tx.Sequence) !== Number(acct.Sequence)) return no("sequence_not_current", payer);
+    if (method === "sequence") {
+      if (tx.TicketSequence !== undefined) return no("ticket_not_allowed_for_sequence_method", payer);
+      if (Number(tx.Sequence) !== Number(acct.Sequence)) return no("sequence_not_current", payer);
+    } else {
+      if (Number(tx.Sequence) !== 0 || tx.TicketSequence === undefined) return no("ticket_required", payer);
+      const objs = (await this.ledger.request<any>({ command: "account_objects", account: payer, type: "ticket", ledger_index: "current", limit: 400 })).account_objects ?? [];
+      if (!objs.some((o: any) => Number(o.TicketSequence) === Number(tx.TicketSequence))) return no("ticket_not_available", payer);
+    }
     // 8. invoice binding
     if (re.invoiceId !== undefined && String(tx.InvoiceID ?? "").toUpperCase() !== await invoiceHash(String(re.invoiceId))) return no("invoice_id_mismatch", payer);
     // 9. safety
@@ -271,7 +338,10 @@ export class X402Facilitator {
     const blob = p.payload.signedTxBlob, hash = hashes.hashSignedTx(blob);
     // check-and-record with no await in between (single process): duplicates are refused until the tx can't land
     if (this.pending.has(hash)) return { success: false, errorReason: "duplicate_settlement", payer: v.payer, transaction: hash, network: this.network };
+    const tk = v.tx!.TicketSequence !== undefined ? `${v.payer}:${v.tx!.TicketSequence}` : "";
+    if (tk && this.pendingTickets.has(tk)) return { success: false, errorReason: "ticket_already_pending", payer: v.payer, transaction: hash, network: this.network };
     this.pending.set(hash, Number(v.tx!.LastLedgerSequence));
+    if (tk) this.pendingTickets.set(tk, Number(v.tx!.LastLedgerSequence));
     this.prune().catch(() => {});
     try {
       const proof = await submitSigned(this.ledger, blob);
@@ -286,6 +356,7 @@ export class X402Facilitator {
   private async prune() {
     const validated = Number((await this.ledger.request<any>({ command: "ledger", ledger_index: "validated" })).ledger_index);
     for (const [h, lls] of this.pending) if (lls < validated) this.pending.delete(h);
+    for (const [t, lls] of this.pendingTickets) if (lls < validated) this.pendingTickets.delete(t);
   }
 }
 
@@ -305,7 +376,8 @@ export async function x402Gate(fac: X402Facilitator, paymentSignature: string | 
   let p: X402PaymentPayload;
   try { p = fromB64json(paymentSignature); } catch { return required("invalid_payload"); }
   const req = accepts.find((r) => ["scheme", "network", "asset", "payTo", "amount", "maxTimeoutSeconds"]
-    .every((k) => String((r as any)[k]) === String((p?.accepted as any)?.[k])));
+    .every((k) => String((r as any)[k]) === String((p?.accepted as any)?.[k]))
+    && transferMethod(r) === (p?.accepted?.extra?.assetTransferMethod ?? "sequence"));
   if (!req) return required("accepted_does_not_match_any_requirement");
   const v = await fac.verify(p, req);
   if (!v.isValid) return required(v.invalidReason ?? "invalid_payment");

@@ -16,7 +16,7 @@
     "e2e:payment": "tsx test/payment.e2e.ts",
     "e2e:dex": "tsx test/dex.e2e.ts",
     "e2e:clawback": "tsx test/clawback.e2e.ts",
-    "e2e:x402": "tsx test/x402.e2e.ts",
+    "e2e:x402": "tsx test/x402.e2e.ts && tsx test/x402-tickets.e2e.ts",
     "test": "tsx test/policy.unit.ts && tsx test/ledger-failover.unit.ts",
     "smoke:mainnet": "tsx test/mainnet-read.smoke.ts"
   },

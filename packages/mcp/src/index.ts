@@ -18,7 +18,7 @@ import {
   getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback, x402Fetch, requirementValue, caip2,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
-import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, agentX402Fetch, returnToOwner, listAgents } from "./agents.js";
+import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, agentX402Fetch, agentTickets, agentTicketStatus, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
 const log = (...a: unknown[]) => console.error("[xrpl-agent]", ...a);   // stdout belongs to MCP
@@ -381,16 +381,32 @@ server.registerTool("xrpl_agent_x402_fetch", {
     "our own ledger proof.",
   inputSchema: { from: ADDR.describe("the agent account"), url: URL_, method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional(),
                  headers: z.record(z.string(), z.string()).optional(), body: z.string().max(100_000).optional(),
-                 max_amount: NUM.optional().describe("refuse if the price is above this (in the asset's units)") },
+                 max_amount: NUM.optional().describe("refuse if the price is above this (in the asset's units)"),
+                 use_tickets: z.boolean().optional().describe("prefer ticketSequence offers so several paid requests can be pending at once " +
+                   "(tickets are created automatically; each locks reserve until used)") },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 }, async (a) => {
   try {
     guardNetwork();
-    const r = await agentX402Fetch(ledger, a.from, a.url, { method: a.method, headers: a.headers, body: a.body }, a.max_amount);
+    const r = await agentX402Fetch(ledger, a.from, a.url, { method: a.method, headers: a.headers, body: a.body }, a.max_amount, { useTickets: a.use_tickets });
     log("x402:", a.url, r.status, r.paid ? `paid ${requirementValue(r.paid.requirement)} → ${r.paid.requirement.payTo} ${r.proof?.result ?? "unconfirmed"}` : "no payment");
     return json({ status: r.status, body: clip(r.body), content_type: r.headers["content-type"],
       payment: r.paid ? { amount: requirementValue(r.paid.requirement), asset: r.paid.requirement.asset, payTo: r.paid.requirement.payTo,
-        invoiceId: r.paid.requirement.extra.invoiceId, tx: r.paid.txHash, seller_settlement: r.paid.settlement, ledger_proof: r.proof } : null });
+        invoiceId: r.paid.requirement.extra.invoiceId, method: r.paid.requirement.extra.assetTransferMethod ?? "sequence", tx: r.paid.txHash, seller_settlement: r.paid.settlement, ledger_proof: r.proof } : null });
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_agent_tickets", {
+  title: "Agent tickets (x402 concurrency)",
+  description: "List an agent account's XRPL Tickets (used by x402 ticketSequence payments so several can be pending at once). " +
+    "Optionally create more (max 10 per account; each locks reserve, spends only the fee) or release unused ones to free reserve.",
+  inputSchema: { from: ADDR, create: z.number().int().min(1).max(10).optional(), release_unused: z.boolean().optional() },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+}, async (a) => {
+  try {
+    if (!a.create && !a.release_unused) return json(await agentTicketStatus(ledger, a.from));
+    guardNetwork();
+    return json(await agentTickets(ledger, a.from, { create: a.create, releaseUnused: a.release_unused }));
   } catch (e) { return fail(e); }
 });
 

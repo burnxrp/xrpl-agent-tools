@@ -69,6 +69,7 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_agent_trustline` | xrpl.agent.trustline | **autonomous**, only for tokens in the owner's token limits |
 | `xrpl_x402_inspect` | xrpl.x402.inspect | read: what a paid URL costs, without paying |
 | `xrpl_agent_x402_fetch` | **xrpl.x402.fetch** | **autonomous**: pays an x402 resource from the agent account within the policy |
+| `xrpl_agent_tickets` | xrpl.agent.tickets | list / create (max 10) / release the agent's XRPL Tickets |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
 | `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
@@ -192,8 +193,18 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
   PAY_TO=r… PRICE_XRP=0.1 node examples/x402-seller.mjs
   ```
 
+**Two ways to sequence a payment** (`assetTransferMethod`):
+- **`sequence`** (the default) uses the account's next sequence number. Only **one payment can be pending at a time**, so the agent holds its account lock from signing until the seller settles.
+- **`ticketSequence`** uses an [XRPL Ticket](https://xrpl.org/docs/concepts/accounts/tickets), so **several payments can be pending at once**, one ticket each:
+  - the agent holds its lock only while it checks the policy, picks a ticket and signs; the HTTP round trip runs in parallel;
+  - pass `use_tickets: true` to prefer ticket offers. Offers that require tickets are always handled;
+  - tickets are **created automatically** when none are free, at most 10 per agent account. Each locks the 0.2 XRP owner reserve and spends only the fee;
+  - `xrpl_agent_tickets` lists, pre-creates or releases unused ones, which frees the reserve. Release them before **Return funds to owner** to recover that reserve.
+- **The facilitator** checks `Sequence = 0` and that the ticket exists on the ledger. It refuses a second payment on a ticket that's already pending.
+- **Sellers** choose with `x402Requirement({ …, assetTransferMethod })` or `METHOD=sequence|ticketSequence|both` in the example seller. The spec recommends tickets for slow resources.
+
 **Not yet supported:**
-- `ticketSequence` (concurrent pending payments per account), and the `upfront`/`escrow` payment flows. We skip offers that need these.
+- The `upfront`/`escrow` payment flows. We skip offers that need them.
 - Paying from a human wallet with console approval.
 - A Mastercard AP4M voucher signer. That plugs into the same `pay` hook once access is granted.
 
@@ -225,7 +236,18 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
   - the agent checked the price, paid 0.5 XRP on its own and received the resource, the seller's settlement and its own proof;
   - over-limit prices, `max_amount` and the allowlist were all refused before anything was signed.
 
-Tests: `npm run e2e:x402 -w @xrpl-agent/core` and `node packages/mcp/test/agent-x402-e2e.mjs`.
+**Tickets**, verified on public Testnet:
+- **Refused:**
+  - paying a ticket-only offer with the account sequence;
+  - a ticket the payer doesn't own;
+  - two different payments on one ticket, where only one landed;
+  - a ticket offer from a client without ticket support.
+- **Parallel requests:**
+  - three slow paid requests ran in parallel, every one delivered and settled with `Sequence 0` + `TicketSequence` on the ledger;
+  - through MCP, 3 paid requests took **9.8 s with tickets versus 29.3 s with the sequence**.
+- **Ticket upkeep:** tickets were created automatically when none were left, and the leftover ones were released.
+
+Tests: `npm run e2e:x402 -w @xrpl-agent/core` (both suites), `node packages/mcp/test/agent-x402-e2e.mjs` and `node packages/mcp/test/agent-x402-tickets-e2e.mjs`.
 
 **Mainnet signing with extension wallets is enabled.** Verified:
 - the mainnet console shows only extension wallets, no seed entry, and locked actions until one is connected;
@@ -280,6 +302,5 @@ The extensions themselves still need a hands-on test in a browser that has them 
 
 **Next:**
 - a hands-on mainnet test with a real extension wallet;
-- x402 `ticketSequence`;
 - x402 payments from a human wallet via console approval;
 - a Mastercard AP4M voucher signer once early access is granted.

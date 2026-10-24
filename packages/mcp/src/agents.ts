@@ -9,7 +9,8 @@ import { Wallet, type TrustSet } from "xrpl";
 import {
   Ledger, type AgentPolicy, type Asset, defaultPolicy, checkSpend, assetKey, verifyPolicy,
   preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap, verifyPolicyProof, validatePolicy, displayKey,
-  x402Fetch, prepareX402Payment, requirementAsset, requirementValue, verifyTx, type X402FetchResult,
+  x402Challenge, x402Redeem, selectRequirement, transferMethod, prepareX402Payment, requirementAsset, requirementValue, verifyTx,
+  listTickets, prepareTicketCreate, prepareTicketRelease, type X402FetchResult,
 } from "@xrpl-agent/core";
 
 const HOME = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");
@@ -155,31 +156,101 @@ export function agentTrustline(ledger: Ledger, from: string, token: { currency: 
   });
 }
 
+// ── x402 ─────────────────────────────────────────────────────────────────────
+// "sequence" offers: the whole payment (sign → seller settles) holds the account's lock — one pending payment at a time,
+// as the spec asks. "ticketSequence" offers: only policy check + ticket pick + signing hold the lock; the HTTP round
+// trip runs outside it, so several paid requests can be pending at once (one ticket each).
+export const MAX_AGENT_TICKETS = 10;
+const TICKET_BATCH = 3;
+const ticketHolds = new Map<string, Map<number, number>>();   // agent → ticket → LastLedgerSequence of the blob using it
+
+async function freeTickets(ledger: Ledger, from: string): Promise<{ all: number[]; free: number[]; validated: number }> {
+  const validated = Number((await ledger.request<any>({ command: "ledger", ledger_index: "validated" })).ledger_index);
+  const holds = ticketHolds.get(from) ?? new Map<number, number>();
+  for (const [t, lls] of holds) if (lls < validated) holds.delete(t);
+  ticketHolds.set(from, holds);
+  const all = await listTickets(ledger, from);
+  return { all, free: all.filter((t) => !holds.has(t)), validated };
+}
+
+/** Must be called inside serial(from). Creates tickets when none are free (bounded by MAX_AGENT_TICKETS). */
+async function takeTicket(ledger: Ledger, from: string, seed: string): Promise<number> {
+  let { all, free } = await freeTickets(ledger, from);
+  if (!free.length) {
+    const count = Math.min(TICKET_BATCH, MAX_AGENT_TICKETS - all.length);
+    if (count < 1) throw new Error(`all ${all.length} tickets are in use by pending payments — wait for them to settle or expire`);
+    const p = await prepareTicketCreate(ledger, { account: from, count });
+    const proof = await submitSigned(ledger, signLocally(seed, p.tx).txBlob);
+    if (!proof.success) throw new Error(`couldn't create tickets: ${proof.result}`);
+    ({ all, free } = await freeTickets(ledger, from));
+    if (!free.length) throw new Error("no ticket available after TicketCreate");
+  }
+  ticketHolds.get(from)!.set(free[0], Number.MAX_SAFE_INTEGER);   // held until we know the blob's expiry
+  return free[0];
+}
+
+export function agentTicketStatus(ledger: Ledger, from: string) {
+  read(from);
+  return freeTickets(ledger, from).then(({ all, free }) => ({ tickets: all, free, inUse: all.filter((t) => !free.includes(t)), max: MAX_AGENT_TICKETS }));
+}
+
+export function agentTickets(ledger: Ledger, from: string, op: { create?: number; releaseUnused?: boolean }) {
+  return serial(from, async () => {
+    const s = read(from), seed = unseal(s.enc);
+    const out: { created?: LedgerProof; released: LedgerProof[] } = { released: [] };
+    if (op.create) {
+      const { all } = await freeTickets(ledger, from);
+      if (all.length + op.create > MAX_AGENT_TICKETS) throw new Error(`at most ${MAX_AGENT_TICKETS} tickets per agent account (has ${all.length})`);
+      out.created = await submitSigned(ledger, signLocally(seed, (await prepareTicketCreate(ledger, { account: from, count: op.create })).tx).txBlob);
+    }
+    if (op.releaseUnused) {
+      const { free } = await freeTickets(ledger, from);
+      for (const t of free) out.released.push(await submitSigned(ledger, signLocally(seed, (await prepareTicketRelease(ledger, { account: from, ticket: t })).tx).txBlob));
+    }
+    return { ...out, ...(await agentTicketStatus(ledger, from)) };
+  });
+}
+
 /** Pay-per-request with x402: fetch `url`; if it answers 402, pay it from the agent account — only if the price fits the
  *  owner's policy (per-tx / 24 h limits for that asset, destination allowlist on payTo) and the agent's own cap. The
  *  signed amount is logged as spent the moment it's signed (conservative: it counts even if the seller never settles). */
-export function agentX402Fetch(ledger: Ledger, from: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string },
-                               maxAmount?: string): Promise<X402FetchResult & { proof?: LedgerProof }> {
-  return serial(from, async () => {
+export async function agentX402Fetch(ledger: Ledger, from: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string },
+                                     maxAmount?: string, opts: { useTickets?: boolean } = {}): Promise<X402FetchResult & { proof?: LedgerProof }> {
+  read(from);
+  const reqInit = { method: init.method ?? "GET", headers: init.headers, body: init.body };
+  const first = await x402Challenge(url, reqInit);
+  if (!first.paymentRequired) return first;
+  const pr = first.paymentRequired;
+  const r = selectRequirement(pr, ledger.network as any, { tickets: true, prefer: opts.useTickets ? "ticketSequence" : "sequence" });
+  const ticketMode = transferMethod(r) === "ticketSequence";
+
+  const signPayment = async (): Promise<string> => {        // runs inside serial(from)
     const s = read(from);
-    const out = await x402Fetch(url, { method: init.method ?? "GET", headers: init.headers, body: init.body }, { network: ledger.network as any,
-      pay: async (r) => {
-        const asset = requirementAsset(r), amount = requirementValue(r), key = assetKey(asset);
-        if (maxAmount !== undefined && Number(amount) > Number(maxAmount)) throw new Error(`price ${amount} ${displayKey(key)} is above your max_amount ${maxAmount}`);
-        const verdict = checkSpend(s.policy, spentLast24h(from, key), { asset, amount, destination: r.payTo });
-        if (!verdict.ok) throw new Error(`policy refused: ${verdict.why}`);
-        const blob = signLocally(unseal(s.enc), (await prepareX402Payment(ledger, from, r)).tx).txBlob;
-        record(from, { at: new Date().toISOString(), hash: "", asset: key, amount, destination: r.payTo, result: "x402-signed", kind: "spend" });
-        return blob;
-      } });
-    if (!out.paid) return out;
-    let proof: LedgerProof | undefined;
-    for (let i = 0; i < 8 && !proof?.validated; i++) {           // the seller settles; confirm on the ledger ourselves
-      try { proof = await verifyTx(ledger, out.paid.txHash); } catch { /* not seen yet */ }
-      if (!proof?.validated) await new Promise((r) => setTimeout(r, 1500));
-    }
-    return { ...out, proof };
-  });
+    const asset = requirementAsset(r), amount = requirementValue(r), key = assetKey(asset);
+    if (maxAmount !== undefined && Number(amount) > Number(maxAmount)) throw new Error(`price ${amount} ${displayKey(key)} is above your max_amount ${maxAmount}`);
+    const verdict = checkSpend(s.policy, spentLast24h(from, key), { asset, amount, destination: r.payTo });
+    if (!verdict.ok) throw new Error(`policy refused: ${verdict.why}`);
+    const seed = unseal(s.enc);
+    const ticket = ticketMode ? await takeTicket(ledger, from, seed) : undefined;
+    try {
+      const p = await prepareX402Payment(ledger, from, r, { ticket });
+      const blob = signLocally(seed, p.tx).txBlob;
+      if (ticket !== undefined) ticketHolds.get(from)!.set(ticket, Number(p.tx.LastLedgerSequence));
+      record(from, { at: new Date().toISOString(), hash: "", asset: key, amount, destination: r.payTo,
+                     result: ticketMode ? "x402-signed (ticket)" : "x402-signed", kind: "spend" });
+      return blob;
+    } catch (e) { if (ticket !== undefined) ticketHolds.get(from)!.delete(ticket); throw e; }
+  };
+
+  const out = ticketMode
+    ? await x402Redeem(url, reqInit, r, await serial(from, signPayment), pr.resource)                       // lock only while signing
+    : await serial(from, async () => x402Redeem(url, reqInit, r, await signPayment(), pr.resource));       // one pending at a time
+  let proof: LedgerProof | undefined;
+  for (let i = 0; i < 8 && !proof?.validated; i++) {           // the seller settles; confirm on the ledger ourselves
+    try { proof = await verifyTx(ledger, out.paid!.txHash); } catch { /* not seen yet */ }
+    if (!proof?.validated) await new Promise((res) => setTimeout(res, 1500));
+  }
+  return { ...out, proof };
 }
 
 /** Send funds back to the owner — always allowed, never counted against limits. Default: everything spendable. */
