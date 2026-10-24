@@ -1,0 +1,34 @@
+# Every push and pull request: build, typecheck, offline tests. No network access to XRPL needed.
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Typecheck console
+        run: npx tsc -p apps/console --noEmit
+      - name: Offline unit tests (policy, x402)
+        run: npm run test:offline -w @xrpl-agent/core
+      - name: No secrets in the tree
+        run: |
+          if git grep -nE '\bs[1-9A-HJ-NP-Za-km-z]{28,29}\b|sEd[1-9A-HJ-NP-Za-km-z]{20,}|BEGIN [A-Z ]*PRIVATE KEY' -- ':!package-lock.json'; then
+            echo "::error::possible secret committed"; exit 1; fi

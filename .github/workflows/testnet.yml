@@ -1,0 +1,60 @@
+# Nightly (and on demand): the full end-to-end suites against the public XRPL Testnet, through public nodes and the
+# public faucet. Each suite runs even if an earlier one failed, so one faucet hiccup doesn't hide the rest.
+name: Testnet e2e
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: core — escrow + payments
+        if: always()
+        run: npm run e2e -w @xrpl-agent/core
+      - name: core — DEX & AMM
+        if: always()
+        run: npm run e2e:dex -w @xrpl-agent/core
+      - name: core — clawback
+        if: always()
+        run: npm run e2e:clawback -w @xrpl-agent/core
+      - name: core — x402 + tickets
+        if: always()
+        run: npm run e2e:x402 -w @xrpl-agent/core
+      - name: core — node failover
+        if: always()
+        run: npx tsx packages/core/test/ledger-failover.unit.ts
+      - name: mcp — agent accounts
+        if: always()
+        run: node packages/mcp/test/agent-account-e2e.mjs
+      - name: mcp — token limits
+        if: always()
+        run: node packages/mcp/test/agent-token-limits-e2e.mjs
+      - name: mcp — DEX & AMM
+        if: always()
+        run: node packages/mcp/test/agent-dex-e2e.mjs
+      - name: mcp — clawback
+        if: always()
+        run: node packages/mcp/test/agent-clawback-e2e.mjs
+      - name: mcp — x402 agent
+        if: always()
+        run: node packages/mcp/test/agent-x402-e2e.mjs
+      - name: mcp — x402 tickets
+        if: always()
+        run: node packages/mcp/test/agent-x402-tickets-e2e.mjs
+      - name: mcp — x402 human wallet
+        if: always()
+        run: node packages/mcp/test/human-x402-e2e.mjs
+      - name: console — wallet guard + policy proofs
+        if: always()
+        run: npx tsx apps/console/test/extension-wallet.e2e.ts
