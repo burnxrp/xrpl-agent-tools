@@ -9,6 +9,7 @@ export interface AccountInfo {
   reserveXrp: string;      // locked by the ledger (base + owner reserve)
   spendableXrp: string;
   ownerCount: number;
+  sequence: number;        // next account Sequence (0 if the account doesn't exist)
   flags: { disableMaster: boolean; requireDestTag: boolean; depositAuth: boolean; defaultRipple: boolean };
 }
 
@@ -24,7 +25,7 @@ async function reserves(ledger: Ledger): Promise<{ base: number; inc: number }> 
 
 export async function getAccount(ledger: Ledger, address: string): Promise<AccountInfo> {
   assertAddress(address);
-  const empty = { address, exists: false, balanceXrp: "0", reserveXrp: "0", spendableXrp: "0", ownerCount: 0,
+  const empty = { address, exists: false, balanceXrp: "0", reserveXrp: "0", spendableXrp: "0", ownerCount: 0, sequence: 0,
                   flags: { disableMaster: false, requireDestTag: false, depositAuth: false, defaultRipple: false } };
   let data: any;
   try {
@@ -39,7 +40,7 @@ export async function getAccount(ledger: Ledger, address: string): Promise<Accou
   const f = Number(data.Flags);
   return {
     address, exists: true, balanceXrp: String(bal), reserveXrp: String(reserve),
-    spendableXrp: String(Math.max(0, +(bal - reserve).toFixed(6))), ownerCount: Number(data.OwnerCount),
+    spendableXrp: String(Math.max(0, +(bal - reserve).toFixed(6))), ownerCount: Number(data.OwnerCount), sequence: Number(data.Sequence),
     flags: { disableMaster: !!(f & 0x00100000), requireDestTag: !!(f & 0x00020000),
              depositAuth: !!(f & 0x01000000), defaultRipple: !!(f & 0x00800000) },
   };

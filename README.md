@@ -131,14 +131,36 @@ Funds can always go back to the owner, with `xrpl_agent_return_to_owner` or the 
 
 We deliberately don't use XRPL's transaction-type delegation as a spending limit, because it isn't one.
 
+## Wallets
+
+The console signs with whichever wallet you connect:
+
+| Wallet | Where the key lives | Networks |
+|---|---|---|
+| **GemWallet** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet / Devnet in v1 |
+| **Crossmark** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet / Devnet in v1 |
+| Dev wallet | this browser tab's `sessionStorage` (faucet or pasted seed) | Testnet / Devnet |
+
+- **The console checks what the extension signed.** It decodes the returned blob and compares it field by field with the transaction you reviewed. If the wallet changed anything (destination, amount, memos, flags), or set a fee above 10× the expected one, the console refuses to submit it. Wallets may only fill in the fee, sequence and signature.
+- **Network check.** The extension must be on the same network as the console, or the connection is refused.
+- **Agent limits work with extensions too.** Extension wallets sign transactions, not arbitrary messages. So when you change an agent's limits, the extension signs an `AccountSet` that carries the policy text in a memo and can **never be applied** (`LastLedgerSequence: 1` → `tefMAX_LEDGER`). It costs no fee and doesn't touch your account. The adapter verifies the signature, the owner's master key and the exact policy. It refuses the approval if a wallet rewrote it into something that could be applied.
+- **The SDKs load only when used.** `@gemwallet/api` 3.8.0 and `@crossmarkio/sdk` 0.4.0 are pinned and load only when you click their button. Note that Crossmark's typings pull an old xrpl 2.x and `node-forge` into `node_modules`, but neither is part of the shipped bundle.
+
 ## Security model
 
-- **Seeds stay with their owner.** In v1, the console signs with a Testnet/Devnet wallet kept in that browser tab only (`sessionStorage`). The seed is never sent to any node, API, the adapter or the agent.
+- **Seeds stay with their owner.** Extension wallets keep their keys in the extension. The dev wallet keeps its Testnet/Devnet seed in that browser tab only (`sessionStorage`). The seed is never sent to any node, API, the adapter or the agent.
 - **The console server is local.** It listens on 127.0.0.1 only, and every API call needs the per-session token from the review link, so other websites open in the same browser can't read or act on approvals.
 - **Mainnet is opt-in.** Mainnet action requests are refused unless you set `XRPL_ALLOW_MAINNET=1`. The console doesn't offer mainnet signing in v1.
 - **Spending limits aren't solved by delegation.** XRPL's transaction-type delegation is not an amount limit. Autonomous spending will come later through a **separately funded agent account**, where the account's own balance caps the exposure.
 
 ## Status
+
+**GemWallet and Crossmark are supported.** Verified:
+- the signed-blob guard rejects a changed destination, amount, memo, partial-payment flag or excessive fee, and an untouched blob submits with `tesSUCCESS`;
+- a policy approval transaction verifies, a different policy, agent or signer doesn't, and a real node rejects it (`tefMAX_LEDGER`) without touching the owner's account;
+- the adapter accepts extension-style approvals.
+
+The extensions themselves still need a hands-on test in a browser that has them installed.
 
 **Clawback is complete.** Verified on public Testnet:
 - enable on a fresh issuer;
@@ -167,4 +189,4 @@ We deliberately don't use XRPL's transaction-type delegation as a spending limit
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** browser-extension wallets (GemWallet / Crossmark), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:** mainnet signing with extension wallets (decision pending), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).

@@ -55,7 +55,7 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
         if (am && req.method === "POST") {
           // A policy change needs the OWNER wallet's signature (the session token alone is not enough —
           // an agent that learned the review link still can't raise its own limits).
-          if (am[2] === "policy") { const b = await body(req); return send(res, 200, { policy: updatePolicy(am[1], b.policy, b.publicKey, b.signature) }); }
+          if (am[2] === "policy") { const b = await body(req); return send(res, 200, { policy: updatePolicy(am[1], b.policy, { publicKey: b.publicKey, signature: b.signature, proofTx: b.proofTx }) }); }
           const b = await body(req);
           return send(res, 200, { proof: await returnToOwner(ledger, am[1], b.amount) });
         }

@@ -9,7 +9,7 @@ import {
   type ClawbackStatus, type Holder,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
-import { forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, type DevWallet } from "./wallet";
+import { connectExtension, forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, WALLET_NAMES, type DevWallet } from "./wallet";
 import type { AgentPolicy } from "@xrpl-agent/core";
 
 type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof" | "agents";
@@ -76,7 +76,8 @@ export default function App() {
           ) : <div className="muted">Wallet not connected</div>}
         </div>
         <WalletControls network={network} realValue={realValue} wallet={wallet} ledger={ledger}
-          onWallet={(w) => { setWallet(w); flash(true, "Wallet connected — its key stays in this tab only."); }}
+          onWallet={(w) => { setWallet(w); flash(true, w.kind === "dev" ? "Wallet connected — its key stays in this tab only."
+            : `${WALLET_NAMES[w.kind]} connected — it signs every transaction itself, after you confirm in the extension.`); }}
           onForget={() => { forgetWallet(); setWallet(null); }} onError={(m) => flash(false, m)} />
       </section>
       <p className="muted small">Direct connection to public XRPL nodes · Local interface · No proprietary backend</p>
@@ -113,7 +114,13 @@ function WalletControls({ network, realValue, wallet, ledger, onWallet, onForget
 }) {
   const [busy, setBusy] = useState(false);
   const [seed, setSeed] = useState("");
-  if (wallet) return <button id="wallet-disconnect" className="ghost" onClick={onForget}>Disconnect</button>;
+  if (wallet) return (
+    <div className="row"><span className="pill">{WALLET_NAMES[wallet.kind]}</span>
+      <button id="wallet-disconnect" className="ghost" onClick={onForget}>Disconnect</button></div>);
+  const ext = (kind: "gem" | "crossmark") => async () => {
+    setBusy(true);
+    try { onWallet(await connectExtension(kind, network)); } catch (e) { onError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+  };
   if (realValue) return <div className="muted small">Mainnet is read-only in v1. Wallet signing is Testnet / Devnet.</div>;
   return (
     <div className="walletbox">
@@ -125,6 +132,10 @@ function WalletControls({ network, realValue, wallet, ledger, onWallet, onForget
           onWallet(saveSeed(w.seed!, network));
         } catch (e) { onError(`Faucet failed: ${e instanceof Error ? e.message : e}`); } finally { setBusy(false); }
       }}>{busy ? "Funding…" : `Create ${NETWORKS[network].name} wallet`}</button>
+      <div className="row">
+        <button id="wallet-gem" className="ghost" disabled={busy} onClick={ext("gem")}>GemWallet</button>
+        <button id="wallet-crossmark" className="ghost" disabled={busy} onClick={ext("crossmark")}>Crossmark</button>
+      </div>
       <div className="row">
         <input id="wallet-seed" type="password" placeholder="or paste a Testnet seed (s…)" value={seed} onChange={(e) => setSeed(e.target.value)} autoComplete="off" />
         <button id="wallet-import" className="ghost" disabled={!seed} onClick={() => {
@@ -302,7 +313,7 @@ function ReviewModal({ ledger, review, onClose, onResult }: {
           <button id="review-sign" disabled={phase === "submitting"} onClick={async () => {
             setPhase("submitting"); setErr("");
             try {
-              const { txBlob } = sign(p.tx);
+              const { txBlob } = await sign(p.tx);
               const proof = await submitSigned(ledger, txBlob);   // straight to the public XRPL node
               review.onDone?.(proof);
               onResult(proof);
@@ -412,7 +423,8 @@ function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
                     try {
                       const policy: AgentPolicy = { ...a.policy, xrp: { perTx: form.perTx, daily: form.daily },
                         allowedDestinations: form.allow.split(",").map((x) => x.trim()).filter(Boolean), version: a.policy.version + 1 };
-                      await agentApi(token, `/agents/${a.address}/policy`, { method: "POST", body: JSON.stringify({ policy, ...signAgentPolicy(a.address, policy) }) });
+                      await agentApi(token, `/agents/${a.address}/policy`, { method: "POST", body: JSON.stringify({ policy,
+                        ...(await signAgentPolicy(a.address, policy, (await getAccount(ledger, a.policy.owner)).sequence)) }) });
                       onMsg(true, "New limits signed by your wallet and applied."); setEdit(null); load();
                     } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
                   }}>Sign & save limits</button>

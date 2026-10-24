@@ -8,7 +8,7 @@ import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:
 import { Wallet } from "xrpl";
 import {
   Ledger, type AgentPolicy, type Asset, defaultPolicy, checkSpend, assetKey, verifyPolicy,
-  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap,
+  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap, verifyPolicyProof,
 } from "@xrpl-agent/core";
 
 const HOME = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");
@@ -149,12 +149,18 @@ export async function returnToOwner(ledger: Ledger, address: string, amount?: st
   return agentPay(ledger, address, { destination: s.policy.owner, amount: amt, asset: "XRP", memo: "return to owner" });
 }
 
-/** Owner-signed policy update (from the console). */
-export function updatePolicy(address: string, policy: AgentPolicy, publicKey: string, signature: string): AgentPolicy {
+/** Owner-signed policy update (from the console): a message signature (local wallet) or a never-applicable signed
+ *  approval transaction (extension wallets). */
+export function updatePolicy(address: string, policy: AgentPolicy,
+                             auth: { publicKey?: string; signature?: string; proofTx?: string }): AgentPolicy {
   const s = read(address);
   if (policy.owner !== s.policy.owner) throw new Error("the owner can't be changed");
   if (!(policy.version > s.policy.version)) throw new Error(`policy version must be greater than ${s.policy.version}`);
-  if (!verifyPolicy(address, policy, publicKey, signature)) throw new Error("not signed by the owner wallet");
+  if (auth.proofTx) {
+    const v = verifyPolicyProof(address, policy, auth.proofTx);
+    if (!v.ok) throw new Error(`not approved by the owner wallet: ${v.why}`);
+  } else if (!auth.publicKey || !auth.signature || !verifyPolicy(address, policy, auth.publicKey, auth.signature))
+    throw new Error("not signed by the owner wallet");
   write({ ...s, policy });
   return policy;
 }

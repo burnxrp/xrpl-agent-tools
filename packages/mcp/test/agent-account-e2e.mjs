@@ -5,7 +5,7 @@ import { Client, Wallet } from "xrpl";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { signPolicy } from "@xrpl-agent/core";
+import { signPolicy, signLocally, policyProofTx } from "@xrpl-agent/core";
 
 const ok = (c, m) => { if (!c) throw new Error("FAIL: " + m); console.log("  ✓", m); };
 const home = mkdtempSync(join(tmpdir(), "xrpl-agent-acct-"));
@@ -52,6 +52,11 @@ const good = await post(`/agents/${A}/policy`, { policy, ...signPolicy(owner.see
 ok(good.ok, "owner-signed policy accepted: 20/payment, 100/day, merchant-only");
 await refused((async () => { const r = await post(`/agents/${A}/policy`, { policy, ...signPolicy(owner.seed, A, policy) }); if (!r.ok) throw new Error((await r.json()).error); })(), "replaying the same version");
 await refused(call("xrpl_agent_pay", { from: A, destination: other.classicAddress, amount: "1", asset: "XRP" }), "paying a non-allowlisted address");
+const p3policy = { ...policy, version: 3 };
+const oseq = (await xc.request({ command: "account_info", account: owner.classicAddress })).result.account_data.Sequence;
+await refused((async () => { const r = await post(`/agents/${A}/policy`, { policy: { ...p3policy, xrp: { perTx: "999", daily: "999" } }, proofTx: signLocally(owner.seed, policyProofTx(A, p3policy, oseq)).txBlob }); if (!r.ok) throw new Error((await r.json()).error); })(), "extension-style approval for a different policy");
+const viaExt = await post(`/agents/${A}/policy`, { policy: p3policy, proofTx: signLocally(owner.seed, policyProofTx(A, p3policy, oseq)).txBlob });
+ok(viaExt.ok, "extension-style approval (signed, never-applicable tx) accepted as v3");
 const p2 = await call("xrpl_agent_pay", { from: A, destination: merchant.classicAddress, amount: "15", asset: "XRP" });
 ok(p2.success, "15 XRP to the merchant now allowed (new limit 20)");
 await refused(call("xrpl_agent_pay", { from: A, destination: merchant.classicAddress, amount: "1", asset: { currency: "USD", issuer: other.classicAddress } }), "a token not in the policy");
