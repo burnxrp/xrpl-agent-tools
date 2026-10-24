@@ -18,6 +18,7 @@ import {
   getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback, x402Fetch, requirementValue, caip2,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
+import { requestX402Approval } from "./x402-approvals.js";
 import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, agentX402Fetch, agentTickets, agentTicketStatus, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
@@ -396,6 +397,27 @@ server.registerTool("xrpl_agent_x402_fetch", {
   } catch (e) { return fail(e); }
 });
 
+server.registerTool("xrpl_x402_fetch", {
+  title: "Paid HTTP request from a human wallet (x402, needs approval)",
+  description: "Fetch a URL; if it answers 402 (x402 v2, XRPL `exact`), queue an approval for the wallet owner: 'pay at most P to S " +
+    "for this request'. When they approve, the price is re-quoted (it can't go up), their wallet signs, and the adapter pays the " +
+    "seller and keeps the response. Poll xrpl_approval_status — once confirmed it includes `response` (the paid resource) and the ledger proof. " +
+    "If the URL doesn't require payment, the response is returned directly.",
+  inputSchema: { account: ADDR.describe("the human wallet that pays"), url: URL_, method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional(),
+                 headers: z.record(z.string(), z.string()).optional(), body: z.string().max(100_000).optional(),
+                 max_amount: NUM.optional().describe("don't even ask if the price is above this") },
+  annotations: ACT,
+}, async (a) => {
+  try {
+    guardNetwork();
+    const r = await requestX402Approval(ledger, { account: a.account, url: a.url, method: a.method, headers: a.headers, body: a.body, maxAmount: a.max_amount });
+    if ("response" in r) return json({ status: "no_payment_needed", response: r.response });
+    log("approval requested:", r.approval.id, r.approval.summary);
+    return json({ status: "awaiting_human_approval", approval_id: r.approval.id, review_url: reviewUrl(r.approval.id), summary: r.approval.summary,
+                  next: "Ask the user to open review_url and approve; then poll xrpl_approval_status for the paid response." });
+  } catch (e) { return fail(e); }
+});
+
 server.registerTool("xrpl_agent_tickets", {
   title: "Agent tickets (x402 concurrency)",
   description: "List an agent account's XRPL Tickets (used by x402 ticketSequence payments so several can be pending at once). " +
@@ -417,6 +439,7 @@ server.registerTool("xrpl_approval_status", {
   const a = approvals.get(approval_id);
   if (!a) return fail("unknown approval_id");
   return json({ approval_id, status: a.status, summary: a.summary, hash: a.hash, proof: a.proof, note: a.note,
+                ...(a.response ? { response: a.response } : {}),
                 review_url: a.status === "pending" ? reviewUrl(a.id) : undefined });
 });
 

@@ -20,7 +20,10 @@ export type Intent =
   | { tool: "amm_deposit"; input: AmmDepositInput & { amount2: string } }
   | { tool: "amm_withdraw"; input: AmmWithdrawInput }
   | { tool: "clawback_enable"; input: { account: string } }
-  | { tool: "clawback"; input: ClawbackInput };
+  | { tool: "clawback"; input: ClawbackInput }
+  // x402: pay AT MOST `amount` of `asset` to `payTo` for one request to `url` (the price is re-quoted when approved)
+  | { tool: "x402"; input: { account: string; url: string; method: string; payTo: string; asset: PaymentInput["asset"]; amount: string;
+                             headers?: Record<string, string>; body?: string } };
 
 export function matchesIntent(intent: Intent, tx: Record<string, any>): { ok: boolean; why?: string } {
   const must = (cond: boolean, why: string) => (cond ? null : why);
@@ -67,6 +70,14 @@ export function matchesIntent(intent: Intent, tx: Record<string, any>): { ok: bo
       must(tx.Account === i.account && samePool(), "different account or pool"),
       must(i.all ? (flags & 0x00020000) !== 0 : Number(tx.LPTokenIn?.value) === Number(i.lpTokens), "different LP amount"),
       must((flags & 0x00080000) === 0 && (flags & 0x00040000) === 0, "single-sided withdrawal not approved"),
+    ] :
+    intent.tool === "x402" ? [
+      must(tx.TransactionType === "Payment", "not a Payment"),
+      must(tx.Account === i.account && tx.Destination === i.payTo, "different sender or payee"),
+      must(i.asset === "XRP" ? typeof (tx.DeliverMax ?? tx.Amount) === "string"
+           : sameAsset(tx.DeliverMax ?? tx.Amount, { currency: currencyCode(i.asset.currency), issuer: i.asset.issuer } as any), "different asset"),
+      must(amountValue(tx.DeliverMax ?? tx.Amount) <= Number(i.amount) * (1 + 1e-12), "more than the approved price"),
+      must(!((Number(tx.Flags) || 0) & 0x00020000), "partial payment flag set"),
     ] :
     intent.tool === "payment" ? [
       must(tx.TransactionType === "Payment", "not a Payment"),

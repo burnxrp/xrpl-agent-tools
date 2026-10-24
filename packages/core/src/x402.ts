@@ -216,6 +216,41 @@ export async function prepareTicketRelease(ledger: Ledger, input: { account: str
   return { network: ledger.network, tx, summary: `Release ticket ${input.ticket}`, details: { ticket: String(input.ticket) }, warnings: [] };
 }
 
+/** The payment-shape rules of scheme_exact_xrpl for a decoded transaction (type, destination/tag, NetworkID, exact
+ *  amount + SendMax rules, no partial/Paths/DeliverMin, invoice binding, no Delegate/Memos/Signers). Undefined = ok.
+ *  Shared by the facilitator and by anyone checking a blob before handing it over (e.g. a human-approved payment). */
+export async function x402TxProblem(req: X402Requirements, tx: Record<string, any>): Promise<string | undefined> {
+  const re = req.extra ?? ({} as X402Requirements["extra"]);
+  if (tx.TransactionType !== "Payment") return "not_a_payment";
+  if (tx.Destination !== req.payTo) return "destination_mismatch";
+  if (re.destinationTag !== undefined && Number(tx.DestinationTag) !== Number(re.destinationTag)) return "destination_tag_mismatch";
+  if (tx.NetworkID !== undefined) return "network_id_must_be_omitted";          // standard networks (≤ 1024) omit it
+  if (tx.Amount !== undefined && tx.DeliverMax !== undefined) return "both_amount_and_delivermax";
+  const dst = tx.DeliverMax ?? tx.Amount;
+  if (dst === undefined) return "missing_amount";
+  if (tx.Paths !== undefined || tx.DeliverMin !== undefined) return "paths_or_delivermin_present";
+  if ((Number(tx.Flags) || 0) & PARTIAL) return "partial_payment";
+  if (req.asset === "XRP") {
+    if (typeof dst !== "string" || !/^\d+$/.test(dst) || BigInt(dst) !== BigInt(req.amount)) return "amount_mismatch";
+    if (tx.SendMax !== undefined) return "sendmax_present_for_xrp";
+  } else {
+    if (typeof dst !== "object" || dst.currency?.toUpperCase() !== req.asset.toUpperCase() || dst.issuer !== re.issuer) return "asset_mismatch";
+    if (cmpDecimal(dst.value, req.amount) !== 0) return "amount_mismatch";
+    const sm = tx.SendMax;
+    if (!sm || typeof sm !== "object" || sm.currency?.toUpperCase() !== req.asset.toUpperCase() || sm.issuer !== re.issuer) return "sendmax_invalid";
+    if (cmpDecimal(sm.value, dst.value) < 0) return "sendmax_below_amount";
+  }
+  if (re.invoiceId !== undefined && String(tx.InvoiceID ?? "").toUpperCase() !== await invoiceHash(String(re.invoiceId))) return "invoice_id_mismatch";
+  if (tx.Delegate !== undefined) return "delegate_not_allowed";
+  if (tx.Memos !== undefined) return "memos_not_allowed";
+  if (tx.Signers !== undefined) return "multisig_not_supported";
+  if (tx.LastLedgerSequence === undefined) return "missing_last_ledger_sequence";
+  const method = transferMethod(req);
+  if (method === "sequence" && tx.TicketSequence !== undefined) return "ticket_not_allowed_for_sequence_method";
+  if (method === "ticketSequence" && (Number(tx.Sequence) !== 0 || tx.TicketSequence === undefined)) return "ticket_required";
+  return undefined;
+}
+
 // ── facilitator (self-hosted): verify + settle ────────────────────────────────
 const PARTIAL = 0x00020000;
 
@@ -251,28 +286,8 @@ export class X402Facilitator {
     let tx: Record<string, any>;
     try { tx = decode(blob) as Record<string, any>; } catch { return no("invalid_transaction"); }
     const payer = String(tx.Account ?? "");
-    if (tx.TransactionType !== "Payment") return no("not_a_payment", payer);
-    // 4. destination
-    if (tx.Destination !== req.payTo) return no("destination_mismatch", payer);
-    if (re.destinationTag !== undefined && Number(tx.DestinationTag) !== Number(re.destinationTag)) return no("destination_tag_mismatch", payer);
-    // 5. network binding (standard networks ≤ 1024 omit NetworkID)
-    if (tx.NetworkID !== undefined) return no("network_id_must_be_omitted", payer);
-    // 6. amount
-    if (tx.Amount !== undefined && tx.DeliverMax !== undefined) return no("both_amount_and_delivermax", payer);
-    const dst = tx.DeliverMax ?? tx.Amount;
-    if (dst === undefined) return no("missing_amount", payer);
-    if (tx.Paths !== undefined || tx.DeliverMin !== undefined) return no("paths_or_delivermin_present", payer);
-    if ((Number(tx.Flags) || 0) & PARTIAL) return no("partial_payment", payer);
-    if (req.asset === "XRP") {
-      if (typeof dst !== "string" || !/^\d+$/.test(dst) || BigInt(dst) !== BigInt(req.amount)) return no("amount_mismatch", payer);
-      if (tx.SendMax !== undefined) return no("sendmax_present_for_xrp", payer);
-    } else {
-      if (typeof dst !== "object" || dst.currency?.toUpperCase() !== req.asset.toUpperCase() || dst.issuer !== re.issuer) return no("asset_mismatch", payer);
-      if (cmpDecimal(dst.value, req.amount) !== 0) return no("amount_mismatch", payer);
-      const sm = tx.SendMax;
-      if (!sm || typeof sm !== "object" || sm.currency?.toUpperCase() !== req.asset.toUpperCase() || sm.issuer !== re.issuer) return no("sendmax_invalid", payer);
-      if (cmpDecimal(sm.value, dst.value) < 0) return no("sendmax_below_amount", payer);
-    }
+    const problem = await x402TxProblem(req, tx);           // rules 3–6, 8 and the payment-shape safety rules
+    if (problem) return no(problem, payer);
     // 7. expiry + sequencing
     if (tx.LastLedgerSequence === undefined) return no("missing_last_ledger_sequence", payer);
     const validated = Number((await this.ledger.request<any>({ command: "ledger", ledger_index: "validated" })).ledger_index);
@@ -289,13 +304,8 @@ export class X402Facilitator {
       const objs = (await this.ledger.request<any>({ command: "account_objects", account: payer, type: "ticket", ledger_index: "current", limit: 400 })).account_objects ?? [];
       if (!objs.some((o: any) => Number(o.TicketSequence) === Number(tx.TicketSequence))) return no("ticket_not_available", payer);
     }
-    // 8. invoice binding
-    if (re.invoiceId !== undefined && String(tx.InvoiceID ?? "").toUpperCase() !== await invoiceHash(String(re.invoiceId))) return no("invoice_id_mismatch", payer);
-    // 9. safety
+    // 9. fee policy
     if (Number(tx.Fee) > (this.opts.maxFeeDrops ?? 1000)) return no("fee_too_high", payer);
-    if (tx.Delegate !== undefined) return no("delegate_not_allowed", payer);
-    if (tx.Memos !== undefined) return no("memos_not_allowed", payer);
-    if (tx.Signers !== undefined) return no("multisig_not_supported", payer);
     // 10. signature (offline) — and the key must control the account (master key unless disabled, or its regular key)
     try { if (!verifySignature(blob)) return no("invalid_signature", payer); } catch { return no("invalid_signature", payer); }
     let signer = "";

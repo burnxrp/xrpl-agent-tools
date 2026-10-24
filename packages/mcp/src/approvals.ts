@@ -19,6 +19,8 @@ export interface Approval {
   hash?: string;
   proof?: LedgerProof;
   note?: string;
+  /** x402 approvals: what the paid resource returned (kept for the agent). */
+  response?: { status: number; contentType?: string; body: string; settlement?: unknown };
 }
 
 const DIR = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");

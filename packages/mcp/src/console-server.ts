@@ -9,6 +9,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Ledger, verifyTx, matchesIntent } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
 import { listAgents, agentStatus, updatePolicy, returnToOwner } from "./agents.js";
+import { quoteX402, redeemX402 } from "./x402-approvals.js";
 
 export const SESSION_TOKEN = randomBytes(24).toString("hex");
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
@@ -45,7 +46,8 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
       const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
       if (url.pathname.startsWith("/api/")) {
         if (!authed(req, port)) return send(res, 401, { error: "missing or wrong console token — open the review link from your agent" });
-        if (url.pathname === "/api/session") return send(res, 200, { network: ledger.network, endpoints: ledger.endpoints });
+        if (url.pathname === "/api/session") return send(res, 200, { network: ledger.network, endpoints: ledger.endpoints,
+                                                                     xamanApiKey: process.env.XRPL_XAMAN_API_KEY || undefined });   // public app key, not a secret
         if (url.pathname === "/api/approvals" && req.method === "GET") return send(res, 200, { approvals: approvals.list().slice().reverse() });
         if (url.pathname === "/api/agents" && req.method === "GET") {
           const list = await Promise.all(listAgents(ledger.network).map((a) => agentStatus(ledger, a.address).catch(() => ({ ...a, error: true }))));
@@ -59,12 +61,25 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
           const b = await body(req);
           return send(res, 200, { proof: await returnToOwner(ledger, am[1], b.amount) });
         }
+        const xm = url.pathname.match(/^\/api\/approvals\/([0-9a-f]{12})\/x402\/(quote|redeem)$/);
+        if (xm && req.method === "POST") {
+          const a = approvals.get(xm[1]);
+          if (!a) return send(res, 404, { error: "unknown approval" });
+          if (a.status !== "pending") return send(res, 409, { error: `already ${a.status}` });
+          if (a.network !== ledger.network) return send(res, 409, { error: `approval is for ${a.network}` });
+          try {
+            if (xm[2] === "quote") return send(res, 200, { requirement: await quoteX402(ledger, a) });
+            const b = await body(req);
+            return send(res, 200, await redeemX402(ledger, a, String(b.signedTxBlob ?? "")));
+          } catch (e: any) { return send(res, 409, { error: String(e?.message || e) }); }
+        }
         const m = url.pathname.match(/^\/api\/approvals\/([0-9a-f]{12})\/(reject|result)$/);
         if (m && req.method === "POST") {
           const a = approvals.get(m[1]);
           if (!a) return send(res, 404, { error: "unknown approval" });
           if (a.status !== "pending") return send(res, 409, { error: `already ${a.status}` });
           if (m[2] === "reject") return send(res, 200, approvals.update(a.id, { status: "rejected", note: "rejected by the human" }));
+          if (a.intent.tool === "x402") return send(res, 409, { error: "x402 approvals are paid through /x402/redeem" });
           const { hash } = await body(req);
           if (!/^[0-9A-F]{64}$/i.test(String(hash))) return send(res, 400, { error: "bad hash" });
           // Independently check the ledger: validated, and exactly what was approved.
