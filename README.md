@@ -68,6 +68,7 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_agent_swap` | xrpl.agent.swap | **autonomous**: the amount sold counts against the policy; slippage ≤ 5% |
 | `xrpl_agent_trustline` | xrpl.agent.trustline | **autonomous**, only for tokens in the owner's token limits |
 | `xrpl_x402_inspect` | xrpl.x402.inspect | read: what a paid URL costs, without paying |
+| `xrpl_x402_fetch` | xrpl.x402.fetch (human) | needs human approval: pays from the person's own wallet |
 | `xrpl_agent_x402_fetch` | **xrpl.x402.fetch** | **autonomous**: pays an x402 resource from the agent account within the policy |
 | `xrpl_agent_tickets` | xrpl.agent.tickets | list / create (max 10) / release the agent's XRPL Tickets |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
@@ -149,22 +150,33 @@ The console signs with whichever wallet you connect:
 
 | Wallet | Where the key lives | Networks |
 |---|---|---|
+| **Xaman** (mobile app) | on your phone. Each sign request opens in Xaman (QR code or push), and you confirm there. | Testnet · Devnet · **Mainnet** |
+| **Joey** (browser extension) | in the extension. It confirms every transaction. | Testnet · Devnet · **Mainnet** |
 | **GemWallet** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet · Devnet · **Mainnet** |
 | **Crossmark** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet · Devnet · **Mainnet** |
 | Dev wallet | this browser tab's `sessionStorage` (faucet or pasted seed) | Testnet / Devnet only, **never Mainnet** |
 
-- **The console checks what the extension signed.** It decodes the returned blob and compares it field by field with the transaction you reviewed. If the wallet changed anything (destination, amount, memos, flags), or set a fee above 10× the expected one, the console refuses to submit it. Wallets may only fill in the fee, sequence and signature.
+- **Xaman setup:**
+  - create a free app at [apps.xaman.dev](https://apps.xaman.dev), and add the console's address (for example `http://127.0.0.1:7480` and `http://localhost:5179`) as an allowed origin / redirect;
+  - paste its **API key** when the console asks. The key is public, not a secret, and stays in this browser's `localStorage`;
+  - or start the adapter with `XRPL_XAMAN_API_KEY=…`.
+- **How Xaman requests are handled:**
+  - every request is created with `submit: false`, so Xaman returns the signature and the console (or the x402 adapter) submits;
+  - each request is pinned with `force_network`;
+  - the console refuses the result unless Xaman reports the **same NetworkID** and the same account.
+- **Joey** uses its official extension SDK (`@joeywallet/wallet-sdk`, XLS-72d / Wallet Standard). Every signature passes `chain: "xrpl:N"` as a guard and `autofill: false`, so Joey signs exactly the reviewed transaction. The **Joey mobile app** connects through WalletConnect, which needs a Reown project ID; that's not built yet.
+- **The console checks what the wallet signed.** It decodes the returned blob and compares it field by field with the transaction you reviewed. If the wallet changed anything (destination, amount, memos, flags), or set a fee above 10× the expected one, the console refuses to submit it. Wallets may only fill in the fee, sequence and signature.
 - **Network check.** The chain *and* the network must match exactly: XRPL Mainnet ≠ Xahau Mainnet (GemWallet calls both "Mainnet"), and AMM-Devnet, sidechains and custom networks never match. The check runs when you connect **and again before every signature**, so switching the extension's network mid-session blocks signing.
 
 ### Mainnet
 
-- **Signing:** mainnet signing works **only with GemWallet or Crossmark**. The console never accepts a seed on Mainnet; a stored dev wallet is ignored and importing a seed is refused. Without an extension wallet, Mainnet is read-only.
+- **Signing:** mainnet signing works **only with Xaman, Joey, GemWallet or Crossmark**. The console never accepts a seed on Mainnet; a stored dev wallet is ignored and importing a seed is refused. Without an extension wallet, Mainnet is read-only.
 - **Warnings:** the header shows **MAINNET · real funds**. Every review shows a red banner, and **Approve & sign** stays disabled until you tick that you've checked the details. Then the extension asks you to confirm again.
 - **Agent requests:** they still need the adapter started with `XRPL_NETWORK=mainnet XRPL_ALLOW_MAINNET=1`. Inbox approvals are refused if their network doesn't match the console's.
 - **Agent accounts on Mainnet** have no faucet. The owner funds them, and that balance is the hard cap.
 - **Node failover:** if a public node rate-limits (`slowDown`, quota exhausted), the request moves to the next node in the list (xrplcluster.com → s1.ripple.com → s2.ripple.com) and that node is skipped until its back-off ends. To check reads without signing anything, run `npm run smoke:mainnet -w @xrpl-agent/core`.
 - **Agent limits work with extensions too.** Extension wallets sign transactions, not arbitrary messages. So when you change an agent's limits, the extension signs an `AccountSet` that carries the policy text in a memo and can **never be applied** (`LastLedgerSequence: 1` → `tefMAX_LEDGER`). It costs no fee and doesn't touch your account. The adapter verifies the signature, the owner's master key and the exact policy. It refuses the approval if a wallet rewrote it into something that could be applied.
-- **The SDKs load only when used.** `@gemwallet/api` 3.8.0 and `@crossmarkio/sdk` 0.4.0 are pinned and load only when you click their button. Note that Crossmark's typings pull an old xrpl 2.x and `node-forge` into `node_modules`, but neither is part of the shipped bundle.
+- **The SDKs load only when used.** `xumm` 1.8.1, `@joeywallet/wallet-sdk` 0.5.0, `@gemwallet/api` 3.8.0 and `@crossmarkio/sdk` 0.4.0 are pinned and load only when you click their button. Note that Crossmark's typings pull an old xrpl 2.x and `node-forge` into `node_modules`, but neither is part of the shipped bundle.
 
 ## x402: pay-per-request on XRPL
 
@@ -193,6 +205,13 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
   PAY_TO=r… PRICE_XRP=0.1 node examples/x402-seller.mjs
   ```
 
+**From a human wallet (`xrpl_x402_fetch`):** the agent asks, and the person approves each payment in the console.
+1. **The agent asks.** The adapter requests the URL. If it answers 402, the adapter queues an approval: *"Pay at most 0.3 XRP to r… for GET url"*. Free URLs are returned directly.
+2. **The person clicks Review & sign.** The adapter fetches a **fresh quote**, because the seller's invoice may have expired while the request waited. It continues only if the **payee and asset are the same and the price isn't higher**. A lower price is paid at the lower amount.
+3. **The wallet signs, and the console does not submit.** The dev wallet, GemWallet and Crossmark all work, and extension blobs pass the signed-blob guard.
+4. **The adapter re-checks and pays.** It checks the signed payment against the quote: shape rules, sender, signature, and the approved maximum. Then it hands the payment to the seller, confirms it **on the ledger itself**, and stores the seller's response.
+5. **The agent collects.** It polls `xrpl_approval_status` and gets `response` (status and body) plus the ledger proof.
+
 **Two ways to sequence a payment** (`assetTransferMethod`):
 - **`sequence`** (the default) uses the account's next sequence number. Only **one payment can be pending at a time**, so the agent holds its account lock from signing until the seller settles.
 - **`ticketSequence`** uses an [XRPL Ticket](https://xrpl.org/docs/concepts/accounts/tickets), so **several payments can be pending at once**, one ticket each:
@@ -205,7 +224,6 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
 
 **Not yet supported:**
 - The `upfront`/`escrow` payment flows. We skip offers that need them.
-- Paying from a human wallet with console approval.
 - A Mastercard AP4M voucher signer. That plugs into the same `pay` hook once access is granted.
 
 ## Security model
@@ -247,7 +265,18 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
   - through MCP, 3 paid requests took **9.8 s with tickets versus 29.3 s with the sequence**.
 - **Ticket upkeep:** tickets were created automatically when none were left, and the leftover ones were released.
 
-Tests: `npm run e2e:x402 -w @xrpl-agent/core` (both suites), `node packages/mcp/test/agent-x402-e2e.mjs` and `node packages/mcp/test/agent-x402-tickets-e2e.mjs`.
+**Human-wallet x402**, verified on public Testnet:
+- **Happy path:** request → approval → fresh quote → signed → seller paid exactly → the agent got the response and proof.
+- **Refused:**
+  - a price increase between request and approval (a decrease was paid at the lower price);
+  - a changed payee;
+  - signed payments to someone else or for less;
+  - an undecodable payment, a redeem without a quote, or redeeming twice;
+  - the plain `/result` path;
+  - `max_amount`.
+- **In the real console:** the inbox → Review & sign → 0.3 XRP paid → the agent received `{"joke": …}` with a validated proof.
+
+Tests: `npm run e2e:x402 -w @xrpl-agent/core` (both suites), `node packages/mcp/test/human-x402-e2e.mjs`, `node packages/mcp/test/agent-x402-e2e.mjs` and `node packages/mcp/test/agent-x402-tickets-e2e.mjs`.
 
 **Mainnet signing with extension wallets is enabled.** Verified:
 - the mainnet console shows only extension wallets, no seed entry, and locked actions until one is connected;
@@ -302,5 +331,4 @@ The extensions themselves still need a hands-on test in a browser that has them 
 
 **Next:**
 - a hands-on mainnet test with a real extension wallet;
-- x402 payments from a human wallet via console approval;
 - a Mastercard AP4M voucher signer once early access is granted.

@@ -63,3 +63,4 @@ pre { background: #0d1118; border: 1px solid var(--line); border-radius: 9px; pa
 a { color: var(--accent2); }
 .pill.danger { color: #fff; background: #7f1d1d; border-color: #b91c1c; font-weight: 700; }
 .danger-banner { background: rgba(185,28,28,.15); border: 1px solid #b91c1c; color: #fca5a5; border-radius: 9px; padding: 8px 10px; font-weight: 700; font-size: 13px; }
+.row.wrap { flex-wrap: wrap; }

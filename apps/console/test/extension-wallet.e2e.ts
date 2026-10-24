@@ -2,7 +2,7 @@
 // Crossmark return, (2) the never-applicable policy approval transaction — signed, verified, and rejected by a real node.
 import { Wallet } from "xrpl";
 import { Ledger, policyProofTx, verifyPolicyProof, defaultPolicy, preparePayment, signLocally, submitSigned } from "@xrpl-agent/core";
-import { assertSignedMatches, _sameNetwork, _gemNet, _crossNet } from "../src/wallet";
+import { assertSignedMatches, _sameNetwork, _gemNet, _crossNet, _joeyNet } from "../src/wallet";
 
 const ok = (c: boolean, m: string) => { if (!c) throw new Error("FAIL: " + m); console.log("  ✓", m); };
 const refused = (f: () => unknown, m: string) => { try { f(); } catch (e) { return ok(true, `${m} → ${(e as Error).message}`); } ok(false, `${m} should be refused`); };
@@ -21,6 +21,8 @@ async function main() {
   ok(_sameNetwork(cm("xrp ledger", "mainnet"), "mainnet") && _sameNetwork(cm("xrp ledger", "testnet"), "testnet"), "Crossmark xrp ledger mainnet/testnet match");
   ok(!_sameNetwork(cm("xahau", "mainnet"), "mainnet") && !_sameNetwork(cm("xrp ledger", "xls38d"), "devnet"), "Crossmark Xahau / sidechain don't match");
   ok(!_sameNetwork(_crossNet(undefined), "mainnet") && !_sameNetwork(_gemNet(undefined), "testnet"), "unknown network never matches");
+  ok(_sameNetwork(_joeyNet("xrpl:0"), "mainnet") && _sameNetwork(_joeyNet("xrpl:1"), "testnet") && _sameNetwork(_joeyNet("xrpl:2"), "devnet"), "Joey CAIP-2 xrpl:0/1/2 match");
+  ok(!_sameNetwork(_joeyNet("xrpl:1"), "mainnet") && !_sameNetwork(_joeyNet("xahau:21337"), "mainnet") && !_sameNetwork(_joeyNet(undefined), "testnet"), "Joey testnet/Xahau/unknown don't match mainnet");
 
   console.log("1) signed-blob guard (what an extension returns vs what the human reviewed)");
   const p = await preparePayment(ledger, { account: owner.classicAddress, destination: bob.classicAddress, amount: "3", asset: "XRP" });

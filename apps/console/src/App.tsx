@@ -6,10 +6,10 @@ import {
   preparePayment, type TokenBalance, type Asset, getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder,
   listOffers, prepareOfferCancel, prepareAmmDeposit, prepareAmmWithdraw, type AmmPool, type AmmPosition, type OrderBook,
   type OpenOffer, type SwapQuote, getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
-  type ClawbackStatus, type Holder,
+  type ClawbackStatus, type Holder, prepareX402Payment, transferMethod, listTickets, type X402Requirements,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
-import { connectExtension, forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, WALLET_NAMES, type DevWallet } from "./wallet";
+import { connectExtension, forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, WALLET_NAMES, xamanApiKey, setXamanApiKey, type DevWallet, type ExternalWallet } from "./wallet";
 import { assetKey, displayKey, validatePolicy, type AgentPolicy } from "@xrpl-agent/core";
 
 type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof" | "agents";
@@ -23,7 +23,8 @@ const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
   { id: "agents", name: "Agent accounts", sub: "Autonomous · capped by balance", ready: true },
 ];
 
-interface Review { title: string; prepared: Prepared<any>; onDone?: (p: LedgerProof) => void }
+// submit: hand the signed blob to someone other than the ledger directly (x402: the adapter pays the seller with it)
+interface Review { title: string; prepared: Prepared<any>; onDone?: (p: LedgerProof) => void; submit?: (txBlob: string) => Promise<LedgerProof> }
 
 export default function App() {
   const link = useMemo(readLink, []);
@@ -40,7 +41,7 @@ export default function App() {
   // agent mode: the local adapter decides the network
   useEffect(() => {
     if (!link.token) return;
-    agentApi(link.token, "/session").then((s) => { setAgentNet(s.network); setNetwork(s.network); }).catch(() => setAgentNet(null));
+    agentApi(link.token, "/session").then((s) => { setAgentNet(s.network); setNetwork(s.network); if (s.xamanApiKey && !xamanApiKey()) setXamanApiKey(s.xamanApiKey); }).catch(() => setAgentNet(null));
   }, [link.token]);
 
   useEffect(() => { setWallet(loadWallet(network)); }, [network]);
@@ -120,14 +121,21 @@ function WalletControls({ network, realValue, wallet, ledger, onWallet, onForget
   if (wallet) return (
     <div className="row"><span className="pill">{WALLET_NAMES[wallet.kind]}</span>
       <button id="wallet-disconnect" className="ghost" onClick={onForget}>Disconnect</button></div>);
-  const ext = (kind: "gem" | "crossmark") => async () => {
+  const ext = (kind: ExternalWallet) => async () => {
+    if (kind === "xaman" && !xamanApiKey()) {
+      const k = window.prompt("Xaman API key (from apps.xaman.dev — it's public, not a secret). Add this page's address as an allowed origin there.");
+      if (!k) return;
+      setXamanApiKey(k);
+    }
     setBusy(true);
     try { onWallet(await connectExtension(kind, network)); } catch (e) { onError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   };
   if (realValue) return (
     <div className="walletbox">
-      <div className="small warn">Mainnet moves real funds. Connect a browser-extension wallet; it holds the key and confirms every transaction.</div>
-      <div className="row">
+      <div className="small warn">Mainnet moves real funds. Connect a wallet app or extension; it holds the key and confirms every transaction.</div>
+      <div className="row wrap">
+        <button id="wallet-xaman" disabled={busy} onClick={ext("xaman")}>Xaman</button>
+        <button id="wallet-joey" disabled={busy} onClick={ext("joey")}>Joey</button>
         <button id="wallet-gem" disabled={busy} onClick={ext("gem")}>GemWallet</button>
         <button id="wallet-crossmark" disabled={busy} onClick={ext("crossmark")}>Crossmark</button>
       </div>
@@ -142,7 +150,9 @@ function WalletControls({ network, realValue, wallet, ledger, onWallet, onForget
           onWallet(saveSeed(w.seed!, network));
         } catch (e) { onError(`Faucet failed: ${e instanceof Error ? e.message : e}`); } finally { setBusy(false); }
       }}>{busy ? "Funding…" : `Create ${NETWORKS[network].name} wallet`}</button>
-      <div className="row">
+      <div className="row wrap">
+        <button id="wallet-xaman" className="ghost" disabled={busy} onClick={ext("xaman")}>Xaman</button>
+        <button id="wallet-joey" className="ghost" disabled={busy} onClick={ext("joey")}>Joey</button>
         <button id="wallet-gem" className="ghost" disabled={busy} onClick={ext("gem")}>GemWallet</button>
         <button id="wallet-crossmark" className="ghost" disabled={busy} onClick={ext("crossmark")}>Crossmark</button>
       </div>
@@ -329,7 +339,8 @@ function ReviewModal({ ledger, review, onClose, onResult }: {
             setPhase("submitting"); setErr("");
             try {
               const { txBlob } = await sign(p.tx);
-              const proof = await submitSigned(ledger, txBlob);   // straight to the public XRPL node
+              const proof = review.submit ? await review.submit(txBlob)   // x402: the adapter pays the seller with it
+                : await submitSigned(ledger, txBlob);                         // straight to the public XRPL node
               review.onDone?.(proof);
               onResult(proof);
             } catch (e) { setErr(e instanceof Error ? e.message : String(e)); setPhase("review"); }
@@ -341,7 +352,8 @@ function ReviewModal({ ledger, review, onClose, onResult }: {
 }
 
 interface Approval { id: string; createdAt: string; network: string; intent: Intent; summary: string; details: Record<string, string>;
-                     warnings: string[]; status: string; hash?: string; proof?: LedgerProof; note?: string }
+                     warnings: string[]; status: string; hash?: string; proof?: LedgerProof; note?: string;
+                     response?: { status: number; contentType?: string; body: string } }
 
 function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
   token: string; focusId: string | null; ledger: Ledger; wallet: DevWallet | null; onReview: (r: Review) => void; onMsg: (ok: boolean, t: string) => void;
@@ -357,6 +369,28 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
     if (!wallet) return onMsg(false, "Connect the wallet that must sign first");
     if (wallet.address !== i.account) return onMsg(false, `This request must be signed by ${i.account} — connect that wallet`);
     if (a.network !== ledger.network) return onMsg(false, `This request is for ${a.network}, but the console is on ${ledger.network}`);
+    if (a.intent.tool === "x402") {
+      try {
+        // fresh quote from the seller via the adapter (invoices expire; the price can't go above what was requested)
+        const { requirement } = await agentApi<{ requirement: X402Requirements }>(token, `/approvals/${a.id}/x402/quote`, { method: "POST", body: "{}" });
+        let ticket: number | undefined;
+        if (transferMethod(requirement) === "ticketSequence") {
+          ticket = (await listTickets(ledger, i.account))[0];
+          if (ticket === undefined) throw new Error("This seller requires an XRPL Ticket on your account — create one (TicketCreate) and approve again");
+        }
+        const prepared = await prepareX402Payment(ledger, i.account, requirement, { ticket });
+        prepared.details = { ...prepared.details, for: `${i.method} ${i.url}` };
+        onReview({ title: `Agent request · paid request · ${a.id}`, prepared,
+          submit: async (txBlob) => {
+            const done = await agentApi<Approval>(token, `/approvals/${a.id}/x402/redeem`, { method: "POST", body: JSON.stringify({ signedTxBlob: txBlob }) });
+            load();
+            if (!done.proof) throw new Error(done.note || "the payment wasn't confirmed on the ledger");
+            if (done.status !== "confirmed") onMsg(false, done.note || `seller answered HTTP ${done.response?.status}`);
+            return done.proof;
+          } });
+      } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+      return;
+    }
     try {
       // Re-prepare fresh from the approved intent (transactions expire within ~a minute; intents don't).
       const prepared = a.intent.tool === "payment" ? await preparePayment(ledger, i)
@@ -399,7 +433,7 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
         </div>
       ))}
       {recent.length > 0 && <details><summary className="small">Recent</summary>{recent.map((a) => (
-        <div key={a.id} className="muted small">{a.status.toUpperCase()} · {a.summary}{a.proof ? ` · ${a.proof.result}` : ""}{a.note ? ` · ${a.note}` : ""}</div>))}</details>}
+        <div key={a.id} className="muted small">{a.status.toUpperCase()} · {a.summary}{a.proof ? ` · ${a.proof.result}` : ""}{a.response ? ` · seller HTTP ${a.response.status}` : ""}{a.note ? ` · ${a.note}` : ""}</div>))}</details>}
     </section>
   );
 }
