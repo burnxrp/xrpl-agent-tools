@@ -15,6 +15,7 @@ export class Ledger {
   private _client: Client | null = null;
   private _endpoint = "";
   private readonly timeout: number;
+  private readonly throttledUntil = new Map<string, number>();   // endpoint → time it rate-limited us until
 
   constructor(opts: LedgerOptions = {}) {
     this.network = opts.network ?? "testnet";
@@ -32,7 +33,9 @@ export class Ledger {
   async client(): Promise<Client> {
     if (this._client?.isConnected()) return this._client;
     let lastErr: unknown;
-    for (const url of this.endpoints) {
+    const now = Date.now();
+    const fresh = this.endpoints.filter((u) => (this.throttledUntil.get(u) ?? 0) <= now);
+    for (const url of fresh.length ? fresh : this.endpoints) {
       const c = new Client(url, { connectionTimeout: this.timeout });
       try {
         await c.connect();
@@ -47,9 +50,19 @@ export class Ledger {
     throw new Error(`No XRPL endpoint reachable (${this.endpoints.join(", ")}): ${String(lastErr)}`);
   }
 
+  /** A request; if the node rate-limits or is overloaded, move to the next public endpoint and retry once. */
   async request<T = any>(req: Record<string, unknown>): Promise<T> {
     const c = await this.client();
-    return (await c.request(req as any)).result as T;
+    try {
+      return (await c.request(req as any)).result as T;
+    } catch (e: any) {
+      const msg = `${e?.data?.error ?? ""} ${e?.message ?? e}`;
+      if (this.endpoints.length < 2 || !/rate limit|slowDown|tooBusy|noNetwork|quota/i.test(msg)) throw e;
+      const wait = Number(/retry in ~?(\d+)ms/.exec(msg)?.[1] ?? 60_000);
+      this.throttledUntil.set(this._endpoint, Date.now() + Math.min(Math.max(wait, 5_000), 300_000));
+      await this.close();
+      return (await (await this.client()).request(req as any)).result as T;
+    }
   }
 
   /** Ripple-epoch close time of the latest validated ledger (what escrow time conditions are judged against). */

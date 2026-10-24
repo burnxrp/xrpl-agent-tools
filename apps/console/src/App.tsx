@@ -54,6 +54,8 @@ export default function App() {
 
   const flash = (ok: boolean, text: string) => { setToast({ ok, text }); setTimeout(() => setToast(null), 6000); };
   const realValue = NETWORKS[network].realValue;
+  // Mainnet signing only through an extension wallet (its key never touches this page); otherwise read-only.
+  const locked = realValue && (!wallet || wallet.kind === "dev");
 
   return (
     <div className="app">
@@ -62,6 +64,7 @@ export default function App() {
         <select id="network" value={network} disabled={!!agentNet} onChange={(e) => setNetwork(e.target.value as NetworkId)}>
           {(Object.keys(NETWORKS) as NetworkId[]).map((n) => <option key={n} value={n}>{NETWORKS[n].name}</option>)}
         </select>
+        {realValue && <span id="mainnet-pill" className="pill danger">MAINNET · real funds</span>}
         <span className={`pill ${endpoint ? "ok" : "bad"}`}>{endpoint ? `● ${endpoint.replace("wss://", "")}` : "○ connecting…"}</span>
       </header>
 
@@ -94,10 +97,10 @@ export default function App() {
       </nav>
 
       {tool === "account" && <AccountTool acct={acct} network={network} />}
-      {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
-      {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
-      {tool === "clawback" && <ClawbackTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
-      {tool === "dex" && <DexTool ledger={ledger} wallet={wallet} realValue={realValue} onReview={setReview} onMsg={flash} />}
+      {tool === "escrow" && <EscrowTool ledger={ledger} wallet={wallet} realValue={locked} onReview={setReview} onMsg={flash} />}
+      {tool === "payments" && <PaymentsTool ledger={ledger} wallet={wallet} realValue={locked} onReview={setReview} onMsg={flash} />}
+      {tool === "clawback" && <ClawbackTool ledger={ledger} wallet={wallet} realValue={locked} onReview={setReview} onMsg={flash} />}
+      {tool === "dex" && <DexTool ledger={ledger} wallet={wallet} realValue={locked} onReview={setReview} onMsg={flash} />}
       {tool === "proof" && <ProofTool ledger={ledger} />}
       {tool === "agents" && <AgentsTool token={link.token} ledger={ledger} wallet={wallet} onReview={setReview} onMsg={flash} />}
 
@@ -121,7 +124,14 @@ function WalletControls({ network, realValue, wallet, ledger, onWallet, onForget
     setBusy(true);
     try { onWallet(await connectExtension(kind, network)); } catch (e) { onError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   };
-  if (realValue) return <div className="muted small">Mainnet is read-only in v1. Wallet signing is Testnet / Devnet.</div>;
+  if (realValue) return (
+    <div className="walletbox">
+      <div className="small warn">Mainnet moves real funds. Connect a browser-extension wallet; it holds the key and confirms every transaction.</div>
+      <div className="row">
+        <button id="wallet-gem" disabled={busy} onClick={ext("gem")}>GemWallet</button>
+        <button id="wallet-crossmark" disabled={busy} onClick={ext("crossmark")}>Crossmark</button>
+      </div>
+    </div>);
   return (
     <div className="walletbox">
       <button id="wallet-create" disabled={busy} onClick={async () => {
@@ -189,7 +199,7 @@ function EscrowTool({ ledger, wallet, realValue, onReview, onMsg }: {
     catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   }
 
-  if (!wallet) return <section className="card"><h2>Escrow</h2><p className="muted">Connect a Testnet wallet to create and manage escrows.</p></section>;
+  if (!wallet) return <section className="card"><h2>Escrow</h2><p className="muted">Connect a wallet to create and manage escrows.</p></section>;
   return (
     <section className="card">
       <h2>Escrow <span className="muted small">native EscrowCreate · EscrowFinish · EscrowCancel</span></h2>
@@ -237,7 +247,7 @@ function PaymentsTool({ ledger, wallet, realValue, onReview, onMsg }: {
     if (!wallet) return;
     getBalances(ledger, wallet.address).then((b) => setTokens(b.tokens)).catch(() => setTokens([]));
   }, [ledger, wallet]);
-  if (!wallet) return <section className="card"><h2>Payments</h2><p className="muted">Connect a Testnet wallet to send payments.</p></section>;
+  if (!wallet) return <section className="card"><h2>Payments</h2><p className="muted">Connect a wallet to send payments.</p></section>;
   const chosen = asset === "XRP" ? "XRP" as const : (() => { const t = tokens[Number(asset)]; return { currency: t.code, issuer: t.issuer }; })();
   return (
     <section className="card">
@@ -298,19 +308,24 @@ function ReviewModal({ ledger, review, onClose, onResult }: {
   ledger: Ledger; review: Review; onClose: () => void; onResult: (p: LedgerProof) => void;
 }) {
   const [phase, setPhase] = useState<"review" | "submitting">("review"), [err, setErr] = useState("");
-  const p = review.prepared;
+  const p = review.prepared, mainnet = ledger.network === "mainnet";
+  const [ack, setAck] = useState(false);
   return (
     <div className="modal" role="dialog" aria-modal="true">
       <div className="sheet">
         <h2>{review.title}</h2>
+        {mainnet && <p className="danger-banner">MAINNET — this moves real funds and cannot be undone.</p>}
         <p className="summary">{p.summary}</p>
         <dl className="kv">{Object.entries(p.details).map(([k, v]) => <div key={k} className="kvrow"><dt>{k}</dt><dd className="mono">{v}</dd></div>)}</dl>
         {p.warnings.map((w, i) => <p key={i} className="warn">⚠ {w}</p>)}
         <details><summary className="small">Exact transaction</summary><pre>{JSON.stringify(p.tx, null, 2)}</pre></details>
+        {mainnet && <label className="row small" style={{ marginTop: 10 }}>
+          <input id="review-ack" type="checkbox" style={{ width: "auto" }} checked={ack} onChange={(e) => setAck(e.target.checked)} />
+          I checked the details above and understand this uses real funds on the XRP Ledger Mainnet.</label>}
         {err && <p className="bad">{err}</p>}
         <div className="row end">
           <button id="review-cancel" className="ghost" disabled={phase === "submitting"} onClick={onClose}>Cancel</button>
-          <button id="review-sign" disabled={phase === "submitting"} onClick={async () => {
+          <button id="review-sign" disabled={phase === "submitting" || (mainnet && !ack)} onClick={async () => {
             setPhase("submitting"); setErr("");
             try {
               const { txBlob } = await sign(p.tx);
@@ -341,6 +356,7 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
     const i: any = a.intent.input;
     if (!wallet) return onMsg(false, "Connect the wallet that must sign first");
     if (wallet.address !== i.account) return onMsg(false, `This request must be signed by ${i.account} — connect that wallet`);
+    if (a.network !== ledger.network) return onMsg(false, `This request is for ${a.network}, but the console is on ${ledger.network}`);
     try {
       // Re-prepare fresh from the approved intent (transactions expire within ~a minute; intents don't).
       const prepared = a.intent.tool === "payment" ? await preparePayment(ledger, i)
@@ -534,7 +550,7 @@ function DexTool({ ledger, wallet, realValue, onReview, onMsg }: {
     setBusy(true);
     try { onReview({ title, prepared: await fn() }); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   }
-  if (!wallet) return <section className="card"><h2>DEX & AMM</h2><p className="muted">Connect a Testnet wallet to trade or provide liquidity.</p></section>;
+  if (!wallet) return <section className="card"><h2>DEX & AMM</h2><p className="muted">Connect a wallet to trade or provide liquidity.</p></section>;
   const acct = wallet.address, off = busy || realValue;
 
   return (
@@ -614,7 +630,7 @@ function ClawbackTool({ ledger, wallet, realValue, onReview, onMsg }: {
     setBusy(true);
     try { onReview({ title, prepared: await fn() }); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   }
-  if (!wallet) return <section className="card"><h2>Clawback</h2><p className="muted">Connect the issuer's Testnet wallet.</p></section>;
+  if (!wallet) return <section className="card"><h2>Clawback</h2><p className="muted">Connect the issuer's wallet.</p></section>;
   const off = busy || realValue, key = (h: Holder) => `${h.holder}:${h.code}`;
   return (
     <section className="card">

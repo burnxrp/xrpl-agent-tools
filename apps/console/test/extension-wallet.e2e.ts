@@ -2,7 +2,7 @@
 // Crossmark return, (2) the never-applicable policy approval transaction — signed, verified, and rejected by a real node.
 import { Wallet } from "xrpl";
 import { Ledger, policyProofTx, verifyPolicyProof, defaultPolicy, preparePayment, signLocally, submitSigned } from "@xrpl-agent/core";
-import { assertSignedMatches } from "../src/wallet";
+import { assertSignedMatches, _sameNetwork, _gemNet, _crossNet } from "../src/wallet";
 
 const ok = (c: boolean, m: string) => { if (!c) throw new Error("FAIL: " + m); console.log("  ✓", m); };
 const refused = (f: () => unknown, m: string) => { try { f(); } catch (e) { return ok(true, `${m} → ${(e as Error).message}`); } ok(false, `${m} should be refused`); };
@@ -11,6 +11,16 @@ async function main() {
   const ledger = new Ledger({ network: "testnet" }); const c = await ledger.client();
   const [{ wallet: owner }, { wallet: bob }] = await Promise.all([c.fundWallet(), c.fundWallet()]);
   const other = Wallet.generate();
+
+  console.log("0) wallet network matching (exact chain + network)");
+  const gem = (chain: string, network: string) => _gemNet({ type: "response", result: { chain, network, websocket: "" } });
+  ok(_sameNetwork(gem("XRPL", "Mainnet"), "mainnet") && _sameNetwork(gem("XRPL", "Testnet"), "testnet"), "GemWallet XRPL Mainnet/Testnet match");
+  ok(!_sameNetwork(gem("XAHAU", "Mainnet"), "mainnet"), "GemWallet Xahau 'Mainnet' does NOT match XRPL mainnet");
+  ok(!_sameNetwork(gem("XRPL", "AMM-Devnet"), "devnet") && !_sameNetwork(gem("XRPL", "Custom"), "mainnet"), "AMM-Devnet / Custom don't match");
+  const cm = (label: string, type: string) => _crossNet({ protocol: "XRPL", label, type, wss: "", rpc: "" });
+  ok(_sameNetwork(cm("xrp ledger", "mainnet"), "mainnet") && _sameNetwork(cm("xrp ledger", "testnet"), "testnet"), "Crossmark xrp ledger mainnet/testnet match");
+  ok(!_sameNetwork(cm("xahau", "mainnet"), "mainnet") && !_sameNetwork(cm("xrp ledger", "xls38d"), "devnet"), "Crossmark Xahau / sidechain don't match");
+  ok(!_sameNetwork(_crossNet(undefined), "mainnet") && !_sameNetwork(_gemNet(undefined), "testnet"), "unknown network never matches");
 
   console.log("1) signed-blob guard (what an extension returns vs what the human reviewed)");
   const p = await preparePayment(ledger, { account: owner.classicAddress, destination: bob.classicAddress, amount: "3", asset: "XRP" });

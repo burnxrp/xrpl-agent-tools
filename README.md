@@ -146,12 +146,20 @@ The console signs with whichever wallet you connect:
 
 | Wallet | Where the key lives | Networks |
 |---|---|---|
-| **GemWallet** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet / Devnet in v1 |
-| **Crossmark** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet / Devnet in v1 |
-| Dev wallet | this browser tab's `sessionStorage` (faucet or pasted seed) | Testnet / Devnet |
+| **GemWallet** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet · Devnet · **Mainnet** |
+| **Crossmark** (browser extension) | in the extension. It shows its own confirmation for every transaction. | Testnet · Devnet · **Mainnet** |
+| Dev wallet | this browser tab's `sessionStorage` (faucet or pasted seed) | Testnet / Devnet only, **never Mainnet** |
 
 - **The console checks what the extension signed.** It decodes the returned blob and compares it field by field with the transaction you reviewed. If the wallet changed anything (destination, amount, memos, flags), or set a fee above 10× the expected one, the console refuses to submit it. Wallets may only fill in the fee, sequence and signature.
-- **Network check.** The extension must be on the same network as the console, or the connection is refused.
+- **Network check.** The chain *and* the network must match exactly: XRPL Mainnet ≠ Xahau Mainnet (GemWallet calls both "Mainnet"), and AMM-Devnet, sidechains and custom networks never match. The check runs when you connect **and again before every signature**, so switching the extension's network mid-session blocks signing.
+
+### Mainnet
+
+- **Signing:** mainnet signing works **only with GemWallet or Crossmark**. The console never accepts a seed on Mainnet; a stored dev wallet is ignored and importing a seed is refused. Without an extension wallet, Mainnet is read-only.
+- **Warnings:** the header shows **MAINNET · real funds**. Every review shows a red banner, and **Approve & sign** stays disabled until you tick that you've checked the details. Then the extension asks you to confirm again.
+- **Agent requests:** they still need the adapter started with `XRPL_NETWORK=mainnet XRPL_ALLOW_MAINNET=1`. Inbox approvals are refused if their network doesn't match the console's.
+- **Agent accounts on Mainnet** have no faucet. The owner funds them, and that balance is the hard cap.
+- **Node failover:** if a public node rate-limits (`slowDown`, quota exhausted), the request moves to the next node in the list (xrplcluster.com → s1.ripple.com → s2.ripple.com) and that node is skipped until its back-off ends. To check reads without signing anything, run `npm run smoke:mainnet -w @xrpl-agent/core`.
 - **Agent limits work with extensions too.** Extension wallets sign transactions, not arbitrary messages. So when you change an agent's limits, the extension signs an `AccountSet` that carries the policy text in a memo and can **never be applied** (`LastLedgerSequence: 1` → `tefMAX_LEDGER`). It costs no fee and doesn't touch your account. The adapter verifies the signature, the owner's master key and the exact policy. It refuses the approval if a wallet rewrote it into something that could be applied.
 - **The SDKs load only when used.** `@gemwallet/api` 3.8.0 and `@crossmarkio/sdk` 0.4.0 are pinned and load only when you click their button. Note that Crossmark's typings pull an old xrpl 2.x and `node-forge` into `node_modules`, but neither is part of the shipped bundle.
 
@@ -159,10 +167,17 @@ The console signs with whichever wallet you connect:
 
 - **Seeds stay with their owner.** Extension wallets keep their keys in the extension. The dev wallet keeps its Testnet/Devnet seed in that browser tab only (`sessionStorage`). The seed is never sent to any node, API, the adapter or the agent.
 - **The console server is local.** It listens on 127.0.0.1 only, and every API call needs the per-session token from the review link, so other websites open in the same browser can't read or act on approvals.
-- **Mainnet is opt-in.** Mainnet action requests are refused unless you set `XRPL_ALLOW_MAINNET=1`. The console doesn't offer mainnet signing in v1.
+- **Mainnet is opt-in.** Agent mainnet requests are refused unless the adapter has `XRPL_ALLOW_MAINNET=1`. In the console, mainnet signing works only through GemWallet or Crossmark, with an explicit real-funds acknowledgement on every review.
 - **Spending limits aren't solved by delegation.** XRPL's transaction-type delegation is not an amount limit. Autonomous spending will come later through a **separately funded agent account**, where the account's own balance caps the exposure.
 
 ## Status
+
+**Mainnet signing with extension wallets is enabled.** Verified:
+- the mainnet console shows only extension wallets, no seed entry, and locked actions until one is connected;
+- exact network matching, including the Xahau and AMM-Devnet traps;
+- the real-funds acknowledgement gates **Approve & sign**;
+- mainnet reads work through the public nodes, failing over from a rate-limited xrplcluster.com to s1.ripple.com;
+- **not yet done:** a real mainnet transaction through GemWallet or Crossmark, which needs the extensions and real funds.
 
 **Token limits are complete.** Verified on public Testnet with a long-named (hex-coded) token:
 - the agent couldn't open a trustline until the owner listed the token;
@@ -208,4 +223,4 @@ The extensions themselves still need a hands-on test in a browser that has them 
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** mainnet signing with extension wallets (decision pending), and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:** a hands-on mainnet test with a real extension wallet, and an optional card-rails bridge (for example Mastercard Agent Pay).
