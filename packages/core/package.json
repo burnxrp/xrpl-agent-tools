@@ -15,7 +15,8 @@
     "e2e": "tsx test/escrow.e2e.ts && tsx test/payment.e2e.ts",
     "e2e:payment": "tsx test/payment.e2e.ts",
     "e2e:dex": "tsx test/dex.e2e.ts",
-    "e2e:clawback": "tsx test/clawback.e2e.ts"
+    "e2e:clawback": "tsx test/clawback.e2e.ts",
+    "test": "tsx test/policy.unit.ts"
   },
   "dependencies": {
     "xrpl": "5.3.0",

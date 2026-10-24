@@ -66,6 +66,7 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_agent_accounts`, `xrpl_agent_account_status` | xrpl.agent.status | read: balance (the hard cap), policy, last 24 h |
 | `xrpl_agent_pay` | **xrpl.agent.pay** | **autonomous**: no human step, within the owner's policy |
 | `xrpl_agent_swap` | xrpl.agent.swap | **autonomous**: the amount sold counts against the policy; slippage ≤ 5% |
+| `xrpl_agent_trustline` | xrpl.agent.trustline | **autonomous**, only for tokens in the owner's token limits |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
 | `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
@@ -125,6 +126,14 @@ An agent account is a **separate XRPL account that the owner funds**. The agent 
 | **Spending rules:** a per-payment limit, a 24-hour limit, allowed destinations, allowed tokens. Defaults: 10 XRP, 25 XRP/day, any destination, no tokens. | The local adapter, as defence in depth. Spends are processed one at a time, so simultaneous payments can't race past a limit. |
 | **Only the owner can change the rules** | Every policy change must be **signed by the owner's wallet** and carry a higher version number. A session token alone isn't enough, so an agent that learns the console link still can't raise its own limits. |
 
+**Token limits.** An agent can spend or sell an issued token only if the owner's signed policy lists it, with its own per-payment and 24-hour limits. Payments and sells of a token count against the same daily total. In the console, **Edit limits** has a token section. You can add a token the agent already holds from a dropdown, or enter a currency code and issuer. Once a token is listed, the agent can open its own trustline for it with `xrpl_agent_trustline`. That costs the trustline reserve, never funds, and sets NoRipple.
+
+Every policy is validated before it's accepted, in the console and again in the adapter:
+- tokens are stored under one canonical key: the ledger currency code plus the issuer, so `AGENTTOKEN` and its 40-hex form are the same token;
+- limits must be plain positive numbers, with the per-payment limit no higher than the 24-hour limit;
+- destinations must be valid, non-duplicate addresses;
+- a policy may list at most 50 tokens and 200 destinations.
+
 The agent account's key is generated on the agent's machine and encrypted (AES-256-GCM, scrypt key) with a machine key, or with `XRPL_AGENT_PASSPHRASE` if you set one. No tool ever returns it.
 
 Funds can always go back to the owner, with `xrpl_agent_return_to_owner` or the console's **Return funds to owner** button. The console's **Agent accounts** panel shows each account's balance (its cap), rules, spending and history, with **Fund**, **Edit limits** (signed by the owner) and **Return** buttons.
@@ -154,6 +163,16 @@ The console signs with whichever wallet you connect:
 - **Spending limits aren't solved by delegation.** XRPL's transaction-type delegation is not an amount limit. Autonomous spending will come later through a **separately funded agent account**, where the account's own balance caps the exposure.
 
 ## Status
+
+**Token limits are complete.** Verified on public Testnet with a long-named (hex-coded) token:
+- the agent couldn't open a trustline until the owner listed the token;
+- invalid policies were rejected by the adapter;
+- payments within the limit went through, and over-limit payments and sells were refused;
+- payments and sells counted against one 24-hour total;
+- returning tokens to the owner after hitting the limit worked;
+- the console's editor rejected a bad limit and saved a valid one.
+
+Offline policy unit tests: `npm test -w @xrpl-agent/core`.
 
 **GemWallet and Crossmark are supported.** Verified:
 - the signed-blob guard rejects a changed destination, amount, memo, partial-payment flag or excessive fee, and an untouched blob submits with `tesSUCCESS`;
@@ -189,4 +208,4 @@ The extensions themselves still need a hands-on test in a browser that has them 
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** mainnet signing with extension wallets (decision pending), token limits in the console's policy editor, and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:** mainnet signing with extension wallets (decision pending), and an optional card-rails bridge (for example Mastercard Agent Pay).

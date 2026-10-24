@@ -18,7 +18,7 @@ import {
   getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
-import { createAgent, agentStatus, agentPay, agentSwap, returnToOwner, listAgents } from "./agents.js";
+import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
 const log = (...a: unknown[]) => console.error("[xrpl-agent]", ...a);   // stdout belongs to MCP
@@ -345,6 +345,14 @@ server.registerTool("xrpl_clawback", {
     "Issuer-only; never available to agent accounts. Queued for the issuer's approval.",
   inputSchema: { account: ADDR.describe("the issuer"), holder: ADDR, currency: z.string().min(3).max(40), amount: NUM }, annotations: ACT,
 }, async (a) => { try { guardNetwork(); return queue("clawback", a, await prepareClawback(ledger, a)); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_agent_trustline", {
+  title: "Agent trustline (autonomous, policy tokens only)",
+  description: "Open a trustline from an agent account so it can receive a token. Allowed only for tokens in the owner's signed " +
+    "token limits; costs the trustline reserve, never funds. NoRipple is set.",
+  inputSchema: { from: ADDR, currency: z.string().min(3).max(40), issuer: ADDR },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+}, async (a) => { try { guardNetwork(); return json(await agentTrustline(ledger, a.from, { currency: a.currency, issuer: a.issuer })); } catch (e) { return fail(e); } });
 
 server.registerTool("xrpl_approval_status", {
   title: "Approval status", description: "Status of an approval request: pending, rejected, confirmed (with validated ledger proof) or failed.",

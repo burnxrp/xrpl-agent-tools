@@ -10,7 +10,7 @@ import {
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
 import { connectExtension, forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, WALLET_NAMES, type DevWallet } from "./wallet";
-import type { AgentPolicy } from "@xrpl-agent/core";
+import { assetKey, displayKey, validatePolicy, type AgentPolicy } from "@xrpl-agent/core";
 
 type Tool = "account" | "escrow" | "payments" | "clawback" | "dex" | "proof" | "agents";
 const CATALOG: { id: Tool; name: string; sub: string; ready: boolean }[] = [
@@ -238,7 +238,7 @@ function PaymentsTool({ ledger, wallet, realValue, onReview, onMsg }: {
     getBalances(ledger, wallet.address).then((b) => setTokens(b.tokens)).catch(() => setTokens([]));
   }, [ledger, wallet]);
   if (!wallet) return <section className="card"><h2>Payments</h2><p className="muted">Connect a Testnet wallet to send payments.</p></section>;
-  const chosen = asset === "XRP" ? "XRP" as const : (() => { const t = tokens[Number(asset)]; return { currency: t.currency, issuer: t.issuer }; })();
+  const chosen = asset === "XRP" ? "XRP" as const : (() => { const t = tokens[Number(asset)]; return { currency: t.code, issuer: t.issuer }; })();
   return (
     <section className="card">
       <h2>Payments <span className="muted small">native Payment · exact delivery (never partial)</span></h2>
@@ -397,6 +397,15 @@ function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
   const [list, setList] = useState<AgentView[]>([]);
   const [edit, setEdit] = useState<string | null>(null);
   const [form, setForm] = useState({ perTx: "", daily: "", allow: "" });
+  const [tokRows, setTokRows] = useState<{ key: string; perTx: string; daily: string }[]>([]);
+  const [held, setHeld] = useState<TokenBalance[]>([]), [newTok, setNewTok] = useState({ code: "", issuer: "" });
+  function addToken(code: string, issuer: string) {
+    try {
+      const key = assetKey({ currency: code.trim(), issuer: issuer.trim() });
+      if (tokRows.some((r) => r.key === key)) return onMsg(false, "That token already has limits");
+      setTokRows([...tokRows, { key, perTx: "", daily: "" }]); setNewTok({ code: "", issuer: "" });
+    } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); }
+  }
   const load = useCallback(async () => { if (token) try { setList((await agentApi(token, "/agents")).agents); } catch (e) { onMsg(false, String(e)); } }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); const t = setInterval(load, 8000); window.addEventListener("ledger-changed", load);
     return () => { clearInterval(t); window.removeEventListener("ledger-changed", load); }; }, [load]);
@@ -412,17 +421,43 @@ function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
               <b>{a.label}</b> <span className="mono small">{a.address}</span>
               <div className="small">Can spend at most <b>{a.exposureCapXrp} XRP</b> (its balance) · limits {a.policy.xrp.perTx} per payment, {a.policy.xrp.daily} per 24 h
                 · spent {+(a.spentLast24h.XRP || 0).toFixed(6)} today{a.policy.allowedDestinations.length ? ` · only to ${a.policy.allowedDestinations.length} allowed address(es)` : " · any destination"}</div>
-              <div className="muted small">owner {a.policy.owner}{mine ? " (you)" : ""} · policy v{a.policy.version}</div>
+              {Object.entries(a.policy.tokens).length > 0 && <div className="small">Tokens: {Object.entries(a.policy.tokens).map(([k, l]) =>
+                `${displayKey(k)} ${l.perTx}/payment, ${l.daily}/24 h (spent ${+(a.spentLast24h[k] || 0).toFixed(6)})`).join(" · ")}</div>}
+              <div className="muted small">owner {a.policy.owner}{mine ? " (you)" : ""} · policy v{a.policy.version}{Object.keys(a.policy.tokens).length === 0 ? " · may not spend any tokens" : ""}</div>
               {a.recent.slice(0, 3).map((r, k) => <div key={k} className="muted small">{new Date(r.at).toLocaleString()} · {r.kind} {r.amount} {r.asset.split(":")[0]} → {r.destination.slice(0, 8)}… · {r.result}</div>)}
               {edit === a.address && (
                 <div className="form" style={{ marginTop: 8 }}>
                   <label>Max per payment (XRP)<input id={`agent-pertx-${a.address}`} value={form.perTx} onChange={(e) => setForm({ ...form, perTx: e.target.value })} /></label>
                   <label>Max per 24 h (XRP)<input id={`agent-daily-${a.address}`} value={form.daily} onChange={(e) => setForm({ ...form, daily: e.target.value })} /></label>
                   <label>Allowed destinations (comma-separated, blank = any)<input id={`agent-allow-${a.address}`} value={form.allow} onChange={(e) => setForm({ ...form, allow: e.target.value })} /></label>
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <div className="label" style={{ margin: "6px 0" }}>Token limits <span className="muted">(tokens not listed can't be spent or sold)</span></div>
+                    {tokRows.length === 0 && <p className="muted small">No tokens allowed.</p>}
+                    {tokRows.map((r, k) => (
+                      <div key={r.key} className="row" style={{ marginBottom: 6 }}>
+                        <span className="small" style={{ minWidth: 150 }} title={r.key}>{displayKey(r.key)}</span>
+                        <input id={`agent-tok-pertx-${k}`} placeholder="max per payment" value={r.perTx} onChange={(e) => setTokRows(tokRows.map((x, j) => j === k ? { ...x, perTx: e.target.value.trim() } : x))} />
+                        <input id={`agent-tok-daily-${k}`} placeholder="max per 24 h" value={r.daily} onChange={(e) => setTokRows(tokRows.map((x, j) => j === k ? { ...x, daily: e.target.value.trim() } : x))} />
+                        <button className="small ghost" onClick={() => setTokRows(tokRows.filter((_, j) => j !== k))}>Remove</button>
+                      </div>))}
+                    <div className="row">
+                      {held.filter((h) => !tokRows.some((r) => r.key === assetKey({ currency: h.code, issuer: h.issuer }))).length > 0 &&
+                        <select id="agent-tok-held" value="" onChange={(e) => { const h = held[Number(e.target.value)]; if (h) addToken(h.code, h.issuer); }}>
+                          <option value="">+ a token this agent holds…</option>
+                          {held.map((h, k) => <option key={k} value={k}>{h.currency} · {h.issuer.slice(0, 8)}… (bal {h.balance})</option>)}
+                        </select>}
+                      <input id="agent-tok-code" placeholder="or currency code" value={newTok.code} onChange={(e) => setNewTok({ ...newTok, code: e.target.value })} />
+                      <input id="agent-tok-issuer" placeholder="issuer r…" value={newTok.issuer} onChange={(e) => setNewTok({ ...newTok, issuer: e.target.value.trim() })} />
+                      <button id="agent-tok-add" className="small ghost" disabled={!newTok.code || !newTok.issuer} onClick={() => addToken(newTok.code, newTok.issuer)}>Add token</button>
+                    </div>
+                  </div>
                   <button id={`agent-save-${a.address}`} onClick={async () => {
                     try {
-                      const policy: AgentPolicy = { ...a.policy, xrp: { perTx: form.perTx, daily: form.daily },
-                        allowedDestinations: form.allow.split(",").map((x) => x.trim()).filter(Boolean), version: a.policy.version + 1 };
+                      const policy: AgentPolicy = { ...a.policy, xrp: { perTx: form.perTx.trim(), daily: form.daily.trim() },
+                        tokens: Object.fromEntries(tokRows.map((r) => [r.key, { perTx: r.perTx, daily: r.daily }])),
+                        allowedDestinations: [...new Set(form.allow.split(",").map((x) => x.trim()).filter(Boolean))], version: a.policy.version + 1 };
+                      const errs = validatePolicy(policy);
+                      if (errs.length) throw new Error(errs.join("; "));
                       await agentApi(token, `/agents/${a.address}/policy`, { method: "POST", body: JSON.stringify({ policy,
                         ...(await signAgentPolicy(a.address, policy, (await getAccount(ledger, a.policy.owner)).sequence)) }) });
                       onMsg(true, "New limits signed by your wallet and applied."); setEdit(null); load();
@@ -440,6 +475,8 @@ function AgentsTool({ token, ledger, wallet, onReview, onMsg }: {
               <button id={`agent-edit-${a.address}`} className="ghost" disabled={!mine} title={mine ? "" : "connect the owner wallet"} onClick={() => {
                 setEdit(edit === a.address ? null : a.address);
                 setForm({ perTx: a.policy.xrp.perTx, daily: a.policy.xrp.daily, allow: a.policy.allowedDestinations.join(", ") });
+                setTokRows(Object.entries(a.policy.tokens).map(([key, l]) => ({ key, perTx: l.perTx, daily: l.daily })));
+                setHeld([]); getBalances(ledger, a.address).then((b) => setHeld(b.tokens)).catch(() => {});
               }}>Edit limits</button>
               <button id={`agent-return-${a.address}`} className="ghost" onClick={async () => {
                 if (!window.confirm("Send everything spendable back to the owner?")) return;

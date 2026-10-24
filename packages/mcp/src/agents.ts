@@ -5,10 +5,10 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, exists
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { Wallet } from "xrpl";
+import { Wallet, type TrustSet } from "xrpl";
 import {
   Ledger, type AgentPolicy, type Asset, defaultPolicy, checkSpend, assetKey, verifyPolicy,
-  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap, verifyPolicyProof,
+  preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap, verifyPolicyProof, validatePolicy, displayKey,
 } from "@xrpl-agent/core";
 
 const HOME = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");
@@ -140,6 +140,20 @@ export function agentSwap(ledger: Ledger, from: string, req: { sell: Asset; amou
   });
 }
 
+/** Open a trustline so the agent can hold a token — only for tokens the owner's policy lists (costs reserve, not funds). */
+export function agentTrustline(ledger: Ledger, from: string, token: { currency: string; issuer: string }): Promise<LedgerProof> {
+  return serial(from, async () => {
+    const s = read(from);
+    const key = assetKey(token);
+    if (!s.policy.tokens[key]) throw new Error(`policy refused: ${displayKey(key)} is not in this agent's token limits — the owner must add it first`);
+    const c = await ledger.client();
+    const [currency, issuer] = key.split(":");
+    const tx = await c.autofill<TrustSet>({ TransactionType: "TrustSet", Account: from, Flags: 0x00020000 /* tfSetNoRipple */,
+      LimitAmount: { currency, issuer, value: "1000000000000000" } });
+    return submitSigned(ledger, signLocally(unseal(s.enc), tx).txBlob);
+  });
+}
+
 /** Send funds back to the owner — always allowed, never counted against limits. Default: everything spendable. */
 export async function returnToOwner(ledger: Ledger, address: string, amount?: string): Promise<LedgerProof> {
   const s = read(address);
@@ -156,6 +170,8 @@ export function updatePolicy(address: string, policy: AgentPolicy,
   const s = read(address);
   if (policy.owner !== s.policy.owner) throw new Error("the owner can't be changed");
   if (!(policy.version > s.policy.version)) throw new Error(`policy version must be greater than ${s.policy.version}`);
+  const errs = validatePolicy(policy);
+  if (errs.length) throw new Error(`invalid policy: ${errs.join("; ")}`);
   if (auth.proofTx) {
     const v = verifyPolicyProof(address, policy, auth.proofTx);
     if (!v.ok) throw new Error(`not approved by the owner wallet: ${v.why}`);

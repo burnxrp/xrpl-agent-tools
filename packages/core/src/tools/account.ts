@@ -46,7 +46,7 @@ export async function getAccount(ledger: Ledger, address: string): Promise<Accou
   };
 }
 
-export interface TokenBalance { currency: string; issuer: string; balance: string; limit: string }
+export interface TokenBalance { currency: string; code: string; issuer: string; balance: string; limit: string }   // code = exact ledger code
 
 export async function getBalances(ledger: Ledger, address: string): Promise<{ xrp: AccountInfo; tokens: TokenBalance[] }> {
   const xrp = await getAccount(ledger, address);
@@ -54,7 +54,7 @@ export async function getBalances(ledger: Ledger, address: string): Promise<{ xr
   const r = await ledger.request<any>({ command: "account_lines", account: address, ledger_index: "validated", limit: 400 });
   const tokens = (r.lines ?? []).map((l: any) => ({
     currency: l.currency.length === 40 ? convertHexToString(l.currency).replace(/\0+$/, "") || l.currency : l.currency,
-    issuer: l.account, balance: l.balance, limit: l.limit,
+    code: l.currency, issuer: l.account, balance: l.balance, limit: l.limit,
   }));
   return { xrp, tokens };
 }

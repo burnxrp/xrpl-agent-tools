@@ -3,7 +3,9 @@
 // raise its own limits, even if it can reach the local console API.
 import { deriveAddress, sign, verify, deriveKeypair } from "ripple-keypairs";
 import { convertStringToHex, decode, verifySignature, type AccountSet } from "xrpl";
-import type { Asset } from "./tools/payment.js";
+import { currencyCode, type Asset } from "./tools/payment.js";
+import { isValidClassicAddress } from "xrpl";
+import { displayCurrency } from "./amounts.js";
 
 export interface AssetLimit { perTx: string; daily: string }
 
@@ -18,7 +20,50 @@ export interface AgentPolicy {
 export const defaultPolicy = (owner: string): AgentPolicy =>
   ({ owner, xrp: { perTx: "10", daily: "25" }, tokens: {}, allowedDestinations: [], version: 1 });
 
-export const assetKey = (a: Asset): string => (a === "XRP" ? "XRP" : `${a.currency}:${a.issuer}`);
+/** Canonical key: "XRP" or "<ledger currency code>:<issuer>" ("USD:r…", or 40-hex for longer names). */
+export const assetKey = (a: Asset): string => (a === "XRP" ? "XRP" : `${currencyCode(a.currency)}:${a.issuer}`);
+export function parseAssetKey(key: string): Asset {
+  if (key === "XRP") return "XRP";
+  const [currency, issuer] = key.split(":");
+  return { currency, issuer };
+}
+
+const LIMIT = /^\d{1,15}(\.\d{1,15})?$/;
+export const MAX_POLICY_TOKENS = 50, MAX_POLICY_DESTINATIONS = 200;
+
+/** Everything wrong with a policy (empty = valid). Run by the adapter before accepting any signed update. */
+export function validatePolicy(p: AgentPolicy): string[] {
+  const errs: string[] = [];
+  const limit = (l: AssetLimit | undefined, what: string) => {
+    if (!l || !LIMIT.test(String(l.perTx)) || !LIMIT.test(String(l.daily))) return errs.push(`${what}: limits must be plain positive numbers`);
+    if (!(Number(l.perTx) > 0) || !(Number(l.daily) > 0)) errs.push(`${what}: limits must be greater than 0`);
+    if (Number(l.perTx) > Number(l.daily)) errs.push(`${what}: per-transaction limit is above the 24-hour limit`);
+  };
+  if (!isValidClassicAddress(p.owner)) errs.push("owner is not a valid address");
+  if (!Number.isInteger(p.version) || p.version < 1) errs.push("version must be a positive integer");
+  limit(p.xrp, "XRP");
+  const keys = Object.keys(p.tokens ?? {});
+  if (keys.length > MAX_POLICY_TOKENS) errs.push(`at most ${MAX_POLICY_TOKENS} tokens`);
+  for (const k of keys) {
+    const a = parseAssetKey(k);
+    let canonical = "";
+    try { canonical = a === "XRP" ? "" : assetKey(a); } catch { /* bad code */ }
+    if (a === "XRP" || !isValidClassicAddress(a.issuer) || canonical !== k) { errs.push(`token "${k}" is not a valid CURRENCY:issuer key`); continue; }
+    limit(p.tokens[k], displayKey(k));
+  }
+  const d = p.allowedDestinations ?? [];
+  if (d.length > MAX_POLICY_DESTINATIONS) errs.push(`at most ${MAX_POLICY_DESTINATIONS} allowed destinations`);
+  for (const x of d) if (!isValidClassicAddress(x)) errs.push(`allowed destination "${x}" is not a valid address`);
+  if (new Set(d).size !== d.length) errs.push("allowed destinations contain duplicates");
+  return errs;
+}
+
+/** "USD:rIssuer" → "USD (rIssu…)" for people. */
+export function displayKey(k: string): string {
+  const a = parseAssetKey(k);
+  if (a === "XRP") return "XRP";
+  return `${displayCurrency(a.currency)} (${a.issuer.slice(0, 6)}…)`;
+}
 
 export interface SpendRequest { asset: Asset; amount: string; destination?: string }   // no destination = a trade
 
@@ -29,7 +74,7 @@ export function checkSpend(policy: AgentPolicy, spentToday: number, req: SpendRe
   if (req.destination && req.destination !== policy.owner && policy.allowedDestinations.length && !policy.allowedDestinations.includes(req.destination))
     return { ok: false, why: "destination is not on this agent's allowlist" };
   const lim = req.asset === "XRP" ? policy.xrp : policy.tokens[assetKey(req.asset)];
-  if (!lim) return { ok: false, why: `this agent may not spend ${assetKey(req.asset)} (not in its policy)` };
+  if (!lim) return { ok: false, why: `this agent may not spend ${displayKey(assetKey(req.asset))} (not in its token limits)` };
   if (amt > Number(lim.perTx)) return { ok: false, why: `over the per-transaction limit (${lim.perTx})` };
   if (spentToday + amt > Number(lim.daily))
     return { ok: false, why: `over the 24-hour limit (${lim.daily}; already spent ${+spentToday.toFixed(6)})` };
