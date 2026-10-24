@@ -9,6 +9,7 @@ import { Wallet, type TrustSet } from "xrpl";
 import {
   Ledger, type AgentPolicy, type Asset, defaultPolicy, checkSpend, assetKey, verifyPolicy,
   preparePayment, submitSigned, signLocally, getAccount, type LedgerProof, prepareSwap, verifyPolicyProof, validatePolicy, displayKey,
+  x402Fetch, prepareX402Payment, requirementAsset, requirementValue, verifyTx, type X402FetchResult,
 } from "@xrpl-agent/core";
 
 const HOME = process.env.XRPL_AGENT_HOME || join(homedir(), ".xrpl-agent");
@@ -151,6 +152,33 @@ export function agentTrustline(ledger: Ledger, from: string, token: { currency: 
     const tx = await c.autofill<TrustSet>({ TransactionType: "TrustSet", Account: from, Flags: 0x00020000 /* tfSetNoRipple */,
       LimitAmount: { currency, issuer, value: "1000000000000000" } });
     return submitSigned(ledger, signLocally(unseal(s.enc), tx).txBlob);
+  });
+}
+
+/** Pay-per-request with x402: fetch `url`; if it answers 402, pay it from the agent account — only if the price fits the
+ *  owner's policy (per-tx / 24 h limits for that asset, destination allowlist on payTo) and the agent's own cap. The
+ *  signed amount is logged as spent the moment it's signed (conservative: it counts even if the seller never settles). */
+export function agentX402Fetch(ledger: Ledger, from: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string },
+                               maxAmount?: string): Promise<X402FetchResult & { proof?: LedgerProof }> {
+  return serial(from, async () => {
+    const s = read(from);
+    const out = await x402Fetch(url, { method: init.method ?? "GET", headers: init.headers, body: init.body }, { network: ledger.network as any,
+      pay: async (r) => {
+        const asset = requirementAsset(r), amount = requirementValue(r), key = assetKey(asset);
+        if (maxAmount !== undefined && Number(amount) > Number(maxAmount)) throw new Error(`price ${amount} ${displayKey(key)} is above your max_amount ${maxAmount}`);
+        const verdict = checkSpend(s.policy, spentLast24h(from, key), { asset, amount, destination: r.payTo });
+        if (!verdict.ok) throw new Error(`policy refused: ${verdict.why}`);
+        const blob = signLocally(unseal(s.enc), (await prepareX402Payment(ledger, from, r)).tx).txBlob;
+        record(from, { at: new Date().toISOString(), hash: "", asset: key, amount, destination: r.payTo, result: "x402-signed", kind: "spend" });
+        return blob;
+      } });
+    if (!out.paid) return out;
+    let proof: LedgerProof | undefined;
+    for (let i = 0; i < 8 && !proof?.validated; i++) {           // the seller settles; confirm on the ledger ourselves
+      try { proof = await verifyTx(ledger, out.paid.txHash); } catch { /* not seen yet */ }
+      if (!proof?.validated) await new Promise((r) => setTimeout(r, 1500));
+    }
+    return { ...out, proof };
   });
 }
 

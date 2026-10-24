@@ -15,10 +15,10 @@ import {
   prepareEscrowCreate, prepareEscrowFinish, prepareEscrowCancel, fromRippleTime, preparePayment,
   getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder, listOffers, prepareOfferCancel,
   prepareAmmDeposit, prepareAmmWithdraw, type Prepared, type Intent,
-  getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
+  getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback, x402Fetch, requirementValue, caip2,
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
-import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, returnToOwner, listAgents } from "./agents.js";
+import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, agentX402Fetch, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
 const log = (...a: unknown[]) => console.error("[xrpl-agent]", ...a);   // stdout belongs to MCP
@@ -353,6 +353,46 @@ server.registerTool("xrpl_agent_trustline", {
   inputSchema: { from: ADDR, currency: z.string().min(3).max(40), issuer: ADDR },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 }, async (a) => { try { guardNetwork(); return json(await agentTrustline(ledger, a.from, { currency: a.currency, issuer: a.issuer })); } catch (e) { return fail(e); } });
+
+// ── x402: pay-per-request HTTP on XRPL ─────────────────────────────────────────
+const URL_ = z.string().url().refine((u) => /^https?:\/\//i.test(u), "http(s) only");
+const clip = (s: string) => (s.length > 20_000 ? s.slice(0, 20_000) + `… [${s.length - 20_000} more chars]` : s);
+
+server.registerTool("xrpl_x402_inspect", {
+  title: "x402 price check", description: "Request a URL WITHOUT paying. If it's an x402 paid resource, returns what it costs (XRPL options " +
+    "for this network) — otherwise the normal response.",
+  inputSchema: { url: URL_ }, annotations: READ,
+}, async ({ url }) => {
+  try {
+    const r = await x402Fetch(url, { method: "GET" }, { network: ledger.network });
+    if (!r.paymentRequired) return json({ status: r.status, paid_resource: false, body: clip(r.body) });
+    const net = caip2(ledger.network);
+    return json({ status: 402, paid_resource: true, resource: r.paymentRequired.resource, network: net,
+      options: r.paymentRequired.accepts.map((a) => ({ ...a, payable_here: a.scheme === "exact" && a.network === net,
+        human_amount: a.network?.startsWith("xrpl:") ? `${requirementValue(a)} ${a.asset === "XRP" ? "XRP" : a.asset}` : undefined })) });
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool("xrpl_agent_x402_fetch", {
+  title: "Paid HTTP request from the agent account (x402, autonomous)",
+  description: "Fetch a URL; if it answers 402 (x402 v2, XRPL `exact` scheme) pay it from the agent account and return the resource. " +
+    "Pays only if the price fits the owner's policy (limits per asset, allowlist applies to the seller's payTo) and your optional " +
+    "max_amount. The payment is exact, never partial, bound to the seller's invoice; the result includes the seller's settlement and " +
+    "our own ledger proof.",
+  inputSchema: { from: ADDR.describe("the agent account"), url: URL_, method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional(),
+                 headers: z.record(z.string(), z.string()).optional(), body: z.string().max(100_000).optional(),
+                 max_amount: NUM.optional().describe("refuse if the price is above this (in the asset's units)") },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+}, async (a) => {
+  try {
+    guardNetwork();
+    const r = await agentX402Fetch(ledger, a.from, a.url, { method: a.method, headers: a.headers, body: a.body }, a.max_amount);
+    log("x402:", a.url, r.status, r.paid ? `paid ${requirementValue(r.paid.requirement)} → ${r.paid.requirement.payTo} ${r.proof?.result ?? "unconfirmed"}` : "no payment");
+    return json({ status: r.status, body: clip(r.body), content_type: r.headers["content-type"],
+      payment: r.paid ? { amount: requirementValue(r.paid.requirement), asset: r.paid.requirement.asset, payTo: r.paid.requirement.payTo,
+        invoiceId: r.paid.requirement.extra.invoiceId, tx: r.paid.txHash, seller_settlement: r.paid.settlement, ledger_proof: r.proof } : null });
+  } catch (e) { return fail(e); }
+});
 
 server.registerTool("xrpl_approval_status", {
   title: "Approval status", description: "Status of an approval request: pending, rejected, confirmed (with validated ledger proof) or failed.",

@@ -16,7 +16,7 @@ public XRPL nodes, and the result is enforced by ledger consensus.
 
 | Package | What it is |
 |---|---|
-| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, **DEX (order book, quotes, fill-or-kill swaps, limit orders) and AMM (pool info, deposit, withdraw)**, **issuer clawback**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
+| `packages/core` | **XRPL Native Tool SDK** (xrpl.js 5.3). Accounts, balances, native escrow (create / list / finish / cancel), **payments (XRP and issued tokens)**, **DEX (order book, quotes, fill-or-kill swaps, limit orders) and AMM (pool info, deposit, withdraw)**, **issuer clawback**, **x402 pay-per-request (buyer, seller and a self-hosted facilitator)**, signed submission, and ledger proof (including the **delivered** amount). "Done" means a **validated** ledger says `tesSUCCESS`. Submission alone doesn't count. |
 | `packages/mcp` | **Local MCP adapter** (stdio). Read tools answer directly. Every state-changing tool creates an **approval request** that the account owner signs in the console. The adapter never holds or sees a seed. |
 | `apps/console` | **XRPL Agent Console**. A static dashboard that connects straight to public XRPL nodes from the browser. Opened from an agent's review link, it also shows the agent's approval inbox. |
 
@@ -67,6 +67,8 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_agent_pay` | **xrpl.agent.pay** | **autonomous**: no human step, within the owner's policy |
 | `xrpl_agent_swap` | xrpl.agent.swap | **autonomous**: the amount sold counts against the policy; slippage ≤ 5% |
 | `xrpl_agent_trustline` | xrpl.agent.trustline | **autonomous**, only for tokens in the owner's token limits |
+| `xrpl_x402_inspect` | xrpl.x402.inspect | read: what a paid URL costs, without paying |
+| `xrpl_agent_x402_fetch` | **xrpl.x402.fetch** | **autonomous**: pays an x402 resource from the agent account within the policy |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
 | `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
@@ -163,6 +165,38 @@ The console signs with whichever wallet you connect:
 - **Agent limits work with extensions too.** Extension wallets sign transactions, not arbitrary messages. So when you change an agent's limits, the extension signs an `AccountSet` that carries the policy text in a memo and can **never be applied** (`LastLedgerSequence: 1` → `tefMAX_LEDGER`). It costs no fee and doesn't touch your account. The adapter verifies the signature, the owner's master key and the exact policy. It refuses the approval if a wallet rewrote it into something that could be applied.
 - **The SDKs load only when used.** `@gemwallet/api` 3.8.0 and `@crossmarkio/sdk` 0.4.0 are pinned and load only when you click their button. Note that Crossmark's typings pull an old xrpl 2.x and `node-forge` into `node_modules`, but neither is part of the shipped bundle.
 
+## x402: pay-per-request on XRPL
+
+This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_xrpl.md), the open standard for paying for an HTTP resource. The agent pays per request, with no account sign-up and no card network.
+
+**How it works:**
+1. The service answers `402` with a `PAYMENT-REQUIRED` header: price, payee, network (`xrpl:0` mainnet, `xrpl:1` Testnet, `xrpl:2` Devnet) and an invoice.
+2. The buyer signs an **exact XRPL Payment**: never partial, no memos, `InvoiceID = SHA-256(invoiceId)`, an expiry within the seller's timeout, and `SendMax` covering any issuer fee for tokens.
+3. The buyer retries with a `PAYMENT-SIGNATURE` header.
+4. The seller's facilitator verifies, the resource runs, and the facilitator settles on the ledger and returns `PAYMENT-RESPONSE`.
+
+**Buyer (agents):**
+- `xrpl_x402_inspect` shows the price without paying.
+- `xrpl_agent_x402_fetch` pays from an **agent account** only if the price fits the owner's signed policy: per-payment and 24-hour limits for that asset, plus the **allowlist, applied to the seller's `payTo`**. The agent can also set its own `max_amount`.
+- The amount counts as spent **the moment it's signed**. That's conservative: it still counts if the seller never settles.
+- The tool returns the resource, the seller's settlement, and **our own ledger proof** of the payment.
+
+**Seller and facilitator (`X402Facilitator`, `x402Gate` in core):**
+- It's self-hosted, so it runs against public nodes with no central processor. The seller only receives payments, so it needs no key.
+- It enforces every MUST rule in the scheme: envelope, decoding, destination and tag, NetworkID omitted, exact amounts (decimal string compare, no floats), `SendMax` rules for tokens, no Paths, DeliverMin or partial-payment flag, expiry, current sequence, invoice binding, fee cap, no Delegate or Memos.
+- It checks the signature offline, **and** that the signing key really controls the payer's account.
+- It asks the node to **`simulate`** the payment, with targeted checks as a fallback, and **refuses duplicate settlement** of the same signed transaction until it expires.
+- `examples/x402-seller.mjs` is a working paid endpoint:
+
+  ```bash
+  PAY_TO=r… PRICE_XRP=0.1 node examples/x402-seller.mjs
+  ```
+
+**Not yet supported:**
+- `ticketSequence` (concurrent pending payments per account), and the `upfront`/`escrow` payment flows. We skip offers that need these.
+- Paying from a human wallet with console approval.
+- A Mastercard AP4M voucher signer. That plugs into the same `pay` hook once access is granted.
+
 ## Security model
 
 - **Seeds stay with their owner.** Extension wallets keep their keys in the extension. The dev wallet keeps its Testnet/Devnet seed in that browser tab only (`sessionStorage`). The seed is never sent to any node, API, the adapter or the agent.
@@ -171,6 +205,27 @@ The console signs with whichever wallet you connect:
 - **Spending limits aren't solved by delegation.** XRPL's transaction-type delegation is not an amount limit. Autonomous spending will come later through a **separately funded agent account**, where the account's own balance caps the exposure.
 
 ## Status
+
+**x402 is complete.** Verified on public Testnet:
+- **Payments:**
+  - 0.25 XRP and a 2.5 USD token payment through the issuer's 1% fee;
+  - each resource was delivered and settled, and the ledger copy shows the exact amount and the bound `InvoiceID`;
+  - the facilitator used the node's real `simulate`.
+- **Refused:**
+  - an empty blob;
+  - replaying a settled payment;
+  - paying less;
+  - a payment bound to another invoice;
+  - the partial-payment flag;
+  - memos;
+  - a payment signed by a key that doesn't control the payer;
+  - edited payment terms;
+  - two simultaneous settlements of the same blob, where exactly one was delivered.
+- **The agent loop:**
+  - the agent checked the price, paid 0.5 XRP on its own and received the resource, the seller's settlement and its own proof;
+  - over-limit prices, `max_amount` and the allowlist were all refused before anything was signed.
+
+Tests: `npm run e2e:x402 -w @xrpl-agent/core` and `node packages/mcp/test/agent-x402-e2e.mjs`.
 
 **Mainnet signing with extension wallets is enabled.** Verified:
 - the mainnet console shows only extension wallets, no seed entry, and locked actions until one is connected;
@@ -223,4 +278,8 @@ The extensions themselves still need a hands-on test in a browser that has them 
 
 **Milestone 1 is complete.** Native escrow works on public Testnet for both an agent (MCP) and a human (console), with the human approving every agent request. The independence test passes on Ripple's and XRPL Labs' public nodes.
 
-**Next:** a hands-on mainnet test with a real extension wallet, and an optional card-rails bridge (for example Mastercard Agent Pay).
+**Next:**
+- a hands-on mainnet test with a real extension wallet;
+- x402 `ticketSequence`;
+- x402 payments from a human wallet via console approval;
+- a Mastercard AP4M voucher signer once early access is granted.
