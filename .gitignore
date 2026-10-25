@@ -2,3 +2,5 @@ node_modules
 dist
 *.log
 .xrpl-agent
+packages/mcp/console
+*.tgz

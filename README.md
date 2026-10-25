@@ -12,6 +12,17 @@ public XRPL nodes, and the result is enforced by ledger consensus.
                      public XRPL nodes (Testnet / Devnet / Mainnet) — any operator, configurable
 ```
 
+## Get started
+
+**Use it from your AI agent (no clone needed).** Add this to Claude Desktop's `claude_desktop_config.json`, or to any MCP client:
+```json
+{ "mcpServers": { "xrpl": { "command": "npx", "args": ["-y", "@xrpl-agent/mcp"], "env": { "XRPL_NETWORK": "testnet" } } } }
+```
+
+**Use the console in your browser:** **https://burnxrp.github.io/xrpl-agent-tools/**. It's a static page: your wallet (Xaman, Joey, GemWallet, Crossmark, or a Testnet dev wallet) signs, it talks directly to public XRPL nodes, and nothing is stored on a server.
+
+**Build on it:** `npm install @xrpl-agent/core`.
+
 ## Packages
 
 | Package | What it is |
@@ -243,6 +254,13 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
 **Not yet supported:**
 - The `upfront`/`escrow` payment flows. We skip offers that need them.
 - A Mastercard AP4M voucher signer. That plugs into the same `pay` hook once access is granted.
+
+## Releasing
+
+1. Bump `version` in `packages/core/package.json` and `packages/mcp/package.json` (and the mcp → core dependency).
+2. Tag `vX.Y.Z` and push the tag.
+3. `.github/workflows/release.yml` builds and tests, then publishes both packages with **npm provenance**. It authenticates through npm Trusted Publishing, or the `NPM_TOKEN` repo secret.
+4. The hosted console redeploys automatically on every push to `main` that touches the console or core (`.github/workflows/pages.yml`). Set the optional repo variable `XAMAN_API_KEY` to give it a default (public) Xaman app key. Its origin, `https://burnxrp.github.io`, must be allowed in your Xaman app.
 
 ## Security model
 

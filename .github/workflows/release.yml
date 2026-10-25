@@ -1,0 +1,39 @@
+# Publish @xrpl-agent/core and @xrpl-agent/mcp to npm when a version tag (v*) is pushed — with npm provenance, so
+# anyone can verify the packages were built from this repository by this workflow.
+# Auth: npm Trusted Publishing (OIDC) once configured for both packages on npmjs.com, else the NPM_TOKEN secret.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npx tsc -p apps/console --noEmit
+      - run: npm run test:offline -w @xrpl-agent/core
+      - name: Tag matches package versions
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          for p in packages/core packages/mcp; do
+            [ "$(node -p "require('./$p/package.json').version")" = "$V" ] || { echo "::error::$p version != $V"; exit 1; }
+          done
+      - name: Publish @xrpl-agent/core
+        run: npm publish -w @xrpl-agent/core --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish @xrpl-agent/mcp
+        run: npm publish -w @xrpl-agent/mcp --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

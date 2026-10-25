@@ -31,5 +31,40 @@
     "tsx": "4.20.6",
     "@types/node": "22.10.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "BURN",
+  "homepage": "https://github.com/burnxrp/xrpl-agent-tools#readme",
+  "bugs": {
+    "url": "https://github.com/burnxrp/xrpl-agent-tools/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "XRPL tools for AI agents and wallets: payments, escrow, DEX/AMM, clawback, agent spending policies, x402 pay-per-request (buyer, seller, facilitator). Public XRPL nodes only.",
+  "keywords": [
+    "xrpl",
+    "xrp-ledger",
+    "xrp",
+    "ai-agents",
+    "mcp",
+    "x402",
+    "payments",
+    "escrow",
+    "amm",
+    "dex"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/burnxrp/xrpl-agent-tools.git",
+    "directory": "packages/core"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false
 }

@@ -7,7 +7,8 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepack": "node scripts/bundle-console.mjs"
   },
   "dependencies": {
     "@xrpl-agent/core": "0.1.0",
@@ -21,5 +22,39 @@
     "typescript": "7.0.2",
     "@types/node": "22.10.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "BURN",
+  "homepage": "https://github.com/burnxrp/xrpl-agent-tools#readme",
+  "bugs": {
+    "url": "https://github.com/burnxrp/xrpl-agent-tools/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "MCP server that lets AI agents (Claude and others) pay, trade and get paid on the XRP Ledger \u2014 every action approved by you (console or Xaman on your phone) or capped by an owner-signed agent budget.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "xrpl",
+    "xrp-ledger",
+    "ai-agents",
+    "claude",
+    "x402",
+    "xaman",
+    "payments"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/burnxrp/xrpl-agent-tools.git",
+    "directory": "packages/mcp"
+  },
+  "files": [
+    "dist",
+    "console",
+    "README.md",
+    "LICENSE"
+  ]
 }

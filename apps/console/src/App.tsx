@@ -84,7 +84,8 @@ export default function App() {
             : `${WALLET_NAMES[w.kind]} connected — it signs every transaction itself, after you confirm in the extension.`); }}
           onForget={() => { forgetWallet(); setWallet(null); }} onError={(m) => flash(false, m)} />
       </section>
-      <p className="muted small">Direct connection to public XRPL nodes · Local interface · No proprietary backend</p>
+      <p className="muted small">Direct connection to public XRPL nodes · {import.meta.env.VITE_HOSTED ? "Hosted static page — your wallet signs, nothing is stored on a server" : "Local interface"} · No proprietary backend</p>
+      {import.meta.env.VITE_HOSTED && !link.token && <p className="muted small">🤖 To let an AI agent use these tools, run the local adapter: <span className="mono">npx -y @xrpl-agent/mcp</span> — agent requests are approved in its local console or on your phone.</p>}
 
       {link.token && agentNet && <AgentInbox token={link.token} focusId={link.approveId} ledger={ledger} wallet={wallet}
         onReview={setReview} onMsg={flash} />}

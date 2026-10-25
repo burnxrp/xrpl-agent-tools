@@ -19,7 +19,11 @@ export interface DevWallet { address: string; network: string; kind: WalletKind 
 export const WALLET_NAMES: Record<WalletKind, string> = { dev: "Dev wallet (this tab)", gem: "GemWallet", crossmark: "Crossmark",
                                                           joey: "Joey", xaman: "Xaman" };
 const XAMAN_KEY = "xrpl_agent_xaman_api_key";
-export const xamanApiKey = (): string | null => { try { return localStorage.getItem(XAMAN_KEY); } catch { return null; } };
+// The hosted console may ship a default public Xaman app key (VITE_XAMAN_API_KEY); a key the user enters wins.
+export const xamanApiKey = (): string | null => {
+  try { return localStorage.getItem(XAMAN_KEY) || (import.meta.env.VITE_XAMAN_API_KEY as string | undefined) || null; }
+  catch { return (import.meta.env.VITE_XAMAN_API_KEY as string | undefined) || null; }
+};
 export const setXamanApiKey = (k: string) => { try { localStorage.setItem(XAMAN_KEY, k.trim()); } catch { /* private mode */ } };
 
 export function loadWallet(network: string): DevWallet | null {
