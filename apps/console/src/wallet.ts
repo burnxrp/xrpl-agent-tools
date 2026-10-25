@@ -7,8 +7,8 @@
 //  - xaman:     Xaman mobile app — sign requests go to the phone; the signed blob comes back with the network it was
 //               signed on, which must match (needs an Xaman API key from apps.xaman.dev; it is public, not a secret)
 // Whatever an extension returns is decoded and compared with the transaction the human reviewed before it's submitted.
-import { Wallet, decode } from "xrpl";
-import { signLocally, signPolicy as signPolicyCore, policyProofTx, type AgentPolicy } from "@xrpl-agent/core";
+import { Wallet } from "xrpl";
+import { signLocally, signPolicy as signPolicyCore, policyProofTx, signedBlobProblem, type AgentPolicy } from "@xrpl-agent/core";
 
 const KEY = "xrpl_agent_dev_wallet";
 const EXT_KEY = "xrpl_agent_ext_wallet";
@@ -138,19 +138,10 @@ export async function connectExtension(kind: ExternalWallet, network: string): P
   return { address, network, kind };
 }
 
-/** Refuse a signed blob that differs from what the human reviewed (wallets may only add fee/sequence/signature). */
+/** Refuse a signed blob that differs from what the human reviewed (shared rule: core signedBlobProblem). */
 export function assertSignedMatches(prepared: Record<string, any>, txBlob: string) {
-  const signed = decode(txBlob) as Record<string, any>;
-  const ignore = new Set(["Fee", "Sequence", "LastLedgerSequence", "SigningPubKey", "TxnSignature", "Flags", "NetworkID"]);
-  for (const k of new Set([...Object.keys(prepared), ...Object.keys(signed)])) {
-    if (ignore.has(k)) continue;
-    if (JSON.stringify(signed[k]) !== JSON.stringify(prepared[k])) throw new Error(`The wallet changed "${k}" — not submitted`);
-  }
-  const FULLY_CANONICAL = 0x80000000;
-  if (((Number(signed.Flags) || 0) & ~FULLY_CANONICAL) >>> 0 !== ((Number(prepared.Flags) || 0) & ~FULLY_CANONICAL) >>> 0)
-    throw new Error("The wallet changed the transaction flags — not submitted");
-  if (Number(signed.Fee) > Math.max(Number(prepared.Fee) * 10, 2000)) throw new Error(`The wallet set a fee of ${signed.Fee} drops — not submitted`);
-  if (signed.Account !== prepared.Account) throw new Error("Signed by a different account — not submitted");
+  const p = signedBlobProblem(prepared, txBlob);
+  if (p) throw new Error(`${p[0].toUpperCase()}${p.slice(1)} — not submitted`);
 }
 
 export async function sign(tx: Record<string, any>): Promise<{ txBlob: string }> {

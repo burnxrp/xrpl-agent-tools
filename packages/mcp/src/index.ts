@@ -19,6 +19,8 @@ import {
 } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
 import { requestX402Approval } from "./x402-approvals.js";
+import { XamanBridge, xummClient } from "./xaman.js";
+import type { Approval } from "./approvals.js";
 import { createAgent, agentStatus, agentPay, agentSwap, agentTrustline, agentX402Fetch, agentTickets, agentTicketStatus, returnToOwner, listAgents } from "./agents.js";
 import { startConsoleServer, SESSION_TOKEN } from "./console-server.js";
 
@@ -32,6 +34,9 @@ let uiPort = 0;
 const json = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 const fail = (e: unknown) => ({ isError: true, content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }] });
 const reviewUrl = (id: string) => uiPort ? `http://127.0.0.1:${uiPort}/#/approve/${id}?token=${SESSION_TOKEN}` : "(console unavailable)";
+
+let bridge: XamanBridge | null = null;                          // Xaman phone approvals (if key + secret are set)
+const phoneInfo = (a: Approval) => (bridge?.wants(a) ? { sent_to_phone: true, note_phone: "Also pushed to the owner's Xaman app — they can approve on their phone." } : {});
 
 function guardNetwork() {
   if (NETWORKS[network].realValue && process.env.XRPL_ALLOW_MAINNET !== "1")
@@ -96,7 +101,7 @@ server.registerTool("xrpl_escrow_create", {
       ...(p.tx.CancelAfter ? { cancelAfter: fromRippleTime(p.tx.CancelAfter), cancelAfterRipple: p.tx.CancelAfter } : {}) };
     const ap = approvals.add({ network, intent: { tool: "escrow_create", input }, summary: p.summary, details: p.details, warnings: p.warnings });
     log("approval requested:", ap.id, p.summary);
-    return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary,
+    return json({ status: "awaiting_human_approval", approval_id: ap.id, ...phoneInfo(ap), review_url: reviewUrl(ap.id), summary: p.summary,
                   warnings: p.warnings, next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
   } catch (e) { return fail(e); }
 });
@@ -115,7 +120,7 @@ for (const kind of ["finish", "cancel"] as const) {
       guardNetwork();
       const p = kind === "finish" ? await prepareEscrowFinish(ledger, a) : await prepareEscrowCancel(ledger, a);
       const ap = approvals.add({ network, intent: { tool: `escrow_${kind}`, input: a }, summary: p.summary, details: p.details, warnings: p.warnings });
-      return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary });
+      return json({ status: "awaiting_human_approval", approval_id: ap.id, ...phoneInfo(ap), review_url: reviewUrl(ap.id), summary: p.summary });
     } catch (e) { return fail(e); }
   });
 }
@@ -142,7 +147,7 @@ server.registerTool("xrpl_payment_send", {
     const p = await preparePayment(ledger, input);
     const ap = approvals.add({ network, intent: { tool: "payment", input }, summary: p.summary, details: p.details, warnings: p.warnings });
     log("approval requested:", ap.id, p.summary);
-    return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary,
+    return json({ status: "awaiting_human_approval", approval_id: ap.id, ...phoneInfo(ap), review_url: reviewUrl(ap.id), summary: p.summary,
                   warnings: p.warnings, next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
   } catch (e) { return fail(e); }
 });
@@ -216,7 +221,7 @@ server.registerTool("xrpl_agent_request_funding", {
     const p = await preparePayment(ledger, input);
     const ap = approvals.add({ network, intent: { tool: "payment", input }, summary: `Fund agent account ${a.address}: ${a.amount} XRP`,
                                details: { ...p.details, reason: a.reason ?? "—" }, warnings: p.warnings });
-    return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: ap.summary });
+    return json({ status: "awaiting_human_approval", approval_id: ap.id, ...phoneInfo(ap), review_url: reviewUrl(ap.id), summary: ap.summary });
   } catch (e) { return fail(e); }
 });
 
@@ -227,7 +232,7 @@ const NUM = z.string().regex(/^\d+(\.\d+)?$/);
 function queue(tool: Intent["tool"], input: any, p: Prepared<any>) {
   const ap = approvals.add({ network, intent: { tool, input } as Intent, summary: p.summary, details: p.details, warnings: p.warnings });
   log("approval requested:", ap.id, p.summary);
-  return json({ status: "awaiting_human_approval", approval_id: ap.id, review_url: reviewUrl(ap.id), summary: p.summary, warnings: p.warnings,
+  return json({ status: "awaiting_human_approval", approval_id: ap.id, ...phoneInfo(ap), review_url: reviewUrl(ap.id), summary: p.summary, warnings: p.warnings,
                 next: "Ask the user to open review_url and approve; then poll xrpl_approval_status." });
 }
 
@@ -413,7 +418,7 @@ server.registerTool("xrpl_x402_fetch", {
     const r = await requestX402Approval(ledger, { account: a.account, url: a.url, method: a.method, headers: a.headers, body: a.body, maxAmount: a.max_amount });
     if ("response" in r) return json({ status: "no_payment_needed", response: r.response });
     log("approval requested:", r.approval.id, r.approval.summary);
-    return json({ status: "awaiting_human_approval", approval_id: r.approval.id, review_url: reviewUrl(r.approval.id), summary: r.approval.summary,
+    return json({ status: "awaiting_human_approval", approval_id: r.approval.id, ...phoneInfo(r.approval), review_url: reviewUrl(r.approval.id), summary: r.approval.summary,
                   next: "Ask the user to open review_url and approve; then poll xrpl_approval_status for the paid response." });
   } catch (e) { return fail(e); }
 });
@@ -432,6 +437,25 @@ server.registerTool("xrpl_agent_tickets", {
   } catch (e) { return fail(e); }
 });
 
+// ── Xaman phone approvals ─────────────────────────────────────────────────────────
+const needBridge = () => { if (!bridge) throw new Error("phone approvals are off — start the adapter with XRPL_XAMAN_API_KEY and XRPL_XAMAN_API_SECRET (from apps.xaman.dev)"); return bridge; };
+server.registerTool("xrpl_xaman_status", {
+  title: "Phone approvals status", description: "Whether Xaman phone approvals are configured, and which wallet/phone is linked.",
+  inputSchema: {}, annotations: READ,
+}, async () => json(bridge ? bridge.status() : { configured: false, linked: false, how: "set XRPL_XAMAN_API_KEY + XRPL_XAMAN_API_SECRET" }));
+
+server.registerTool("xrpl_xaman_link", {
+  title: "Link a phone (Xaman)",
+  description: "Start linking the owner's Xaman app: returns a link/QR the owner opens on their phone and signs (a sign-in, no transaction). " +
+    "After that, every approval for that wallet is also pushed to the phone. Check with xrpl_xaman_status.",
+  inputSchema: {}, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+}, async () => { try { const r = await needBridge().startLink(); return json({ ...r, next: "Show the user the url (or the QR image) to open with Xaman; then poll xrpl_xaman_status." }); } catch (e) { return fail(e); } });
+
+server.registerTool("xrpl_xaman_unlink", {
+  title: "Unlink the phone", description: "Stop pushing approvals to the linked Xaman app (the console keeps working).",
+  inputSchema: {}, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, async () => { try { return json(needBridge().unlink()); } catch (e) { return fail(e); } });
+
 server.registerTool("xrpl_approval_status", {
   title: "Approval status", description: "Status of an approval request: pending, rejected, confirmed (with validated ledger proof) or failed.",
   inputSchema: { approval_id: z.string().regex(/^[0-9a-f]{12}$/) }, annotations: READ,
@@ -439,7 +463,7 @@ server.registerTool("xrpl_approval_status", {
   const a = approvals.get(approval_id);
   if (!a) return fail("unknown approval_id");
   return json({ approval_id, status: a.status, summary: a.summary, hash: a.hash, proof: a.proof, note: a.note,
-                ...(a.response ? { response: a.response } : {}),
+                ...(a.response ? { response: a.response } : {}), ...(a.phone ? { phone: { state: a.phone.state, note: a.phone.note } } : {}),
                 review_url: a.status === "pending" ? reviewUrl(a.id) : undefined });
 });
 
@@ -449,7 +473,15 @@ server.registerTool("xrpl_tx_verify", {
 }, async ({ hash }) => { try { return json(await verifyTx(ledger, hash.toUpperCase())); } catch (e) { return fail(e); } });
 
 async function main() {
-  try { uiPort = await startConsoleServer(ledger, PORT); log(`console: http://127.0.0.1:${uiPort}/#/?token=${SESSION_TOKEN}`); }
+  const key = process.env.XRPL_XAMAN_API_KEY, secret = process.env.XRPL_XAMAN_API_SECRET;
+  if (key && secret) {
+    try {
+      bridge = new XamanBridge(ledger, await xummClient(key, secret), { expireMinutes: Number(process.env.XRPL_XAMAN_EXPIRE_MIN || 10), log });
+      const st = bridge.status();
+      log(st.linked ? `phone approvals ON (Xaman, ${st.account})` : "phone approvals ready — link a phone with xrpl_xaman_link or the console");
+    } catch (e) { log("phone approvals not started:", e instanceof Error ? e.message : String(e)); }
+  }
+  try { uiPort = await startConsoleServer(ledger, PORT, () => bridge); log(`console: http://127.0.0.1:${uiPort}/#/?token=${SESSION_TOKEN}`); }
   catch (e) { log("console server not started:", String(e)); }
   await server.connect(new StdioServerTransport());
   log(`ready on ${NETWORKS[network].name}`);

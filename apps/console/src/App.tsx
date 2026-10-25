@@ -6,7 +6,7 @@ import {
   preparePayment, type TokenBalance, type Asset, getAmm, getAmmPosition, getOrderBook, quoteSwap, prepareSwap, prepareLimitOrder,
   listOffers, prepareOfferCancel, prepareAmmDeposit, prepareAmmWithdraw, type AmmPool, type AmmPosition, type OrderBook,
   type OpenOffer, type SwapQuote, getClawbackStatus, listHolders, prepareEnableClawback, prepareClawback,
-  type ClawbackStatus, type Holder, prepareX402Payment, transferMethod, listTickets, type X402Requirements,
+  type ClawbackStatus, type Holder, prepareFromIntent, prepareX402Payment, transferMethod, listTickets, type X402Requirements,
 } from "@xrpl-agent/core";
 import { agentApi, readLink } from "./agent";
 import { connectExtension, forgetWallet, loadWallet, saveSeed, sign, signAgentPolicy, WALLET_NAMES, xamanApiKey, setXamanApiKey, type DevWallet, type ExternalWallet } from "./wallet";
@@ -353,6 +353,7 @@ function ReviewModal({ ledger, review, onClose, onResult }: {
 
 interface Approval { id: string; createdAt: string; network: string; intent: Intent; summary: string; details: Record<string, string>;
                      warnings: string[]; status: string; hash?: string; proof?: LedgerProof; note?: string;
+                     phone?: { uuid: string; url?: string; state: string; note?: string };
                      response?: { status: number; contentType?: string; body: string } }
 
 function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
@@ -393,24 +394,7 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
     }
     try {
       // Re-prepare fresh from the approved intent (transactions expire within ~a minute; intents don't).
-      const prepared = a.intent.tool === "payment" ? await preparePayment(ledger, i)
-        : a.intent.tool === "escrow_create"
-        ? await prepareEscrowCreate(ledger, { account: i.account, destination: i.destination, amount: i.amount,
-            finishAfter: i.finishAfter, cancelAfter: i.cancelAfter, destinationTag: i.destinationTag, memo: i.memo })
-        : a.intent.tool === "escrow_finish" ? await prepareEscrowFinish(ledger, i)
-        : a.intent.tool === "escrow_cancel" ? await prepareEscrowCancel(ledger, i)
-        : a.intent.tool === "swap" ? await prepareSwap(ledger, i)            // keeps the agent's approved minimum
-        : a.intent.tool === "limit_order" ? await prepareLimitOrder(ledger, i)
-        : a.intent.tool === "offer_cancel" ? await prepareOfferCancel(ledger, i)
-        : a.intent.tool === "amm_withdraw" ? await prepareAmmWithdraw(ledger, i)
-        : a.intent.tool === "clawback_enable" ? await prepareEnableClawback(ledger, i)
-        : a.intent.tool === "clawback" ? await prepareClawback(ledger, i)
-        : await (async () => {
-            const d = await prepareAmmDeposit(ledger, i);
-            if (Number(d.amount2) > Number(i.amount2) * (1 + 1e-9))
-              throw new Error(`The pool moved: this deposit now needs ${d.amount2} (approved ${i.amount2}). Ask the agent to request it again.`);
-            return d;
-          })();
+      const prepared = await prepareFromIntent(ledger, a.intent);
       onReview({ title: `Agent request · ${a.id}`, prepared, onDone: async (proof) => {
         try { await agentApi(token, `/approvals/${a.id}/result`, { method: "POST", body: JSON.stringify({ hash: proof.hash }) }); }
         catch (e) { onMsg(false, `Ledger result recorded, but the agent wasn't told: ${e}`); }
@@ -422,9 +406,12 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
   return (
     <section className="card inbox">
       <h2>Agent requests <span className="muted small">your AI agent asked for these — nothing happens unless you approve</span></h2>
+      <PhoneApprovals token={token} onMsg={onMsg} />
       {pending.length === 0 ? <p className="muted">No pending requests.</p> : pending.map((a) => (
         <div key={a.id} className={`req ${a.id === focusId ? "focus" : ""}`}>
-          <div><b>{a.summary}</b><div className="muted small">{a.intent.tool} · {new Date(a.createdAt).toLocaleString()} · {a.network}</div>
+          <div><b>{a.summary}</b><div className="muted small">{a.intent.tool} · {new Date(a.createdAt).toLocaleString()} · {a.network}
+            {a.phone?.state === "sent" && <> · <span className="good">📱 sent to your phone</span></>}{a.phone?.state === "expired" && <> · phone request expired</>}
+            {a.phone?.state === "error" && <> · <span className="bad">phone: {a.phone.note}</span></>}</div>
             {a.warnings.map((w, k) => <div key={k} className="warn small">⚠ {w}</div>)}</div>
           <div className="row">
             <button id={`approve-${a.id}`} onClick={() => approve(a)}>Review & sign</button>
@@ -687,5 +674,32 @@ function ClawbackTool({ ledger, wallet, realValue, onReview, onMsg }: {
             </td></tr>)}
         </tbody></table>}
     </section>
+  );
+}
+
+// ── Xaman phone approvals (served by the local adapter) ──────────────────────────
+function PhoneApprovals({ token, onMsg }: { token: string; onMsg: (ok: boolean, t: string) => void }) {
+  const [st, setSt] = useState<{ configured: boolean; linked: boolean; account?: string } | null>(null);
+  const [link, setLink] = useState<{ url?: string; qr?: string } | null>(null);
+  const load = useCallback(async () => { try { setSt(await agentApi(token, "/xaman")); } catch { setSt(null); } }, [token]);
+  useEffect(() => { load(); const t = setInterval(load, link ? 3000 : 15000); return () => clearInterval(t); }, [load, link]);
+  useEffect(() => { if (st?.linked) setLink(null); }, [st?.linked]);
+  if (!st) return null;
+  if (!st.configured) return <p className="muted small">📱 Phone approvals (Xaman): off — start the adapter with XRPL_XAMAN_API_KEY and XRPL_XAMAN_API_SECRET.</p>;
+  return (
+    <div className="req" style={{ borderTop: 0 }}>
+      {st.linked
+        ? <div className="small">📱 <b>Phone approvals on</b> — requests for <span className="mono">{st.account}</span> also go to your Xaman app.</div>
+        : <div className="small">📱 Approve from your phone: link your Xaman app once (a sign-in, no transaction).</div>}
+      <div className="row">
+        {st.linked
+          ? <button id="xaman-unlink" className="small ghost" onClick={async () => { try { setSt(await agentApi(token, "/xaman/unlink", { method: "POST", body: "{}" })); } catch (e) { onMsg(false, String(e)); } }}>Unlink phone</button>
+          : <button id="xaman-link" className="small" onClick={async () => { try { setLink(await agentApi(token, "/xaman/link", { method: "POST", body: "{}" })); } catch (e) { onMsg(false, e instanceof Error ? e.message : String(e)); } }}>Link phone</button>}
+      </div>
+      {link && !st.linked && <div style={{ width: "100%" }} className="small">
+        Scan with Xaman, or open on your phone: {link.url && <a href={link.url} target="_blank" rel="noreferrer">{link.url}</a>}
+        {link.qr && <div><img src={link.qr} alt="Xaman sign-in QR" width={180} height={180} style={{ background: "#fff", borderRadius: 8, marginTop: 6 }} /></div>}
+      </div>}
+    </div>
   );
 }

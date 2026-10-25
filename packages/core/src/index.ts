@@ -13,3 +13,4 @@ export * from "./tools/dex.js";
 export * from "./tools/amm.js";
 export * from "./tools/clawback.js";
 export * from "./x402.js";
+export * from "./approval-prepare.js";

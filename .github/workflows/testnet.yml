@@ -55,6 +55,9 @@ jobs:
       - name: mcp — x402 human wallet
         if: always()
         run: node packages/mcp/test/human-x402-e2e.mjs
+      - name: mcp — Xaman phone approvals (fake phone)
+        if: always()
+        run: node packages/mcp/test/xaman-bridge-e2e.mjs
       - name: console — wallet guard + policy proofs
         if: always()
         run: npx tsx apps/console/test/extension-wallet.e2e.ts

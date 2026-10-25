@@ -6,10 +6,12 @@ import { existsSync } from "node:fs";
 import { join, normalize, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { Ledger, verifyTx, matchesIntent } from "@xrpl-agent/core";
+import { Ledger } from "@xrpl-agent/core";
 import { approvals } from "./approvals.js";
 import { listAgents, agentStatus, updatePolicy, returnToOwner } from "./agents.js";
 import { quoteX402, redeemX402 } from "./x402-approvals.js";
+import { finalizeApproval } from "./finalize.js";
+import type { XamanBridge } from "./xaman.js";
 
 export const SESSION_TOKEN = randomBytes(24).toString("hex");
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
@@ -39,7 +41,7 @@ function send(res: ServerResponse, code: number, data: unknown, type = "applicat
   res.end(type === "application/json" ? JSON.stringify(data) : (data as any));
 }
 
-export function startConsoleServer(ledger: Ledger, port: number): Promise<number> {
+export function startConsoleServer(ledger: Ledger, port: number, phone: () => XamanBridge | null = () => null): Promise<number> {
   const root = consoleDir();
   const server = createServer(async (req, res) => {
     try {
@@ -60,6 +62,12 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
           if (am[2] === "policy") { const b = await body(req); return send(res, 200, { policy: updatePolicy(am[1], b.policy, { publicKey: b.publicKey, signature: b.signature, proofTx: b.proofTx }) }); }
           const b = await body(req);
           return send(res, 200, { proof: await returnToOwner(ledger, am[1], b.amount) });
+        }
+        if (url.pathname === "/api/xaman" && req.method === "GET") return send(res, 200, phone()?.status() ?? { configured: false, linked: false });
+        if ((url.pathname === "/api/xaman/link" || url.pathname === "/api/xaman/unlink") && req.method === "POST") {
+          const b = phone();
+          if (!b) return send(res, 409, { error: "phone approvals are off — start the adapter with XRPL_XAMAN_API_KEY and XRPL_XAMAN_API_SECRET" });
+          return send(res, 200, url.pathname.endsWith("/link") ? await b.startLink() : b.unlink());
         }
         const xm = url.pathname.match(/^\/api\/approvals\/([0-9a-f]{12})\/x402\/(quote|redeem)$/);
         if (xm && req.method === "POST") {
@@ -83,11 +91,8 @@ export function startConsoleServer(ledger: Ledger, port: number): Promise<number
           const { hash } = await body(req);
           if (!/^[0-9A-F]{64}$/i.test(String(hash))) return send(res, 400, { error: "bad hash" });
           // Independently check the ledger: validated, and exactly what was approved.
-          const proof = await verifyTx(ledger, hash);
-          const tx = (await ledger.request<any>({ command: "tx", transaction: hash }));
-          const match = matchesIntent(a.intent, tx.tx_json ?? tx);
-          if (!match.ok) return send(res, 409, approvals.update(a.id, { status: "failed", hash, proof, note: `does not match approval: ${match.why}` }));
-          return send(res, 200, approvals.update(a.id, { status: proof.success ? "confirmed" : "failed", hash, proof }));
+          const r = await finalizeApproval(ledger, a.id, hash);
+          return send(res, r.approval.status === "failed" && r.approval.note?.startsWith("does not match") ? 409 : 200, r.approval);
         }
         return send(res, 404, { error: "not found" });
       }

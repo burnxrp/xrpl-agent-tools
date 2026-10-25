@@ -73,6 +73,7 @@ Add the adapter to your agent's MCP config. For example, in Claude Desktop's `cl
 | `xrpl_agent_tickets` | xrpl.agent.tickets | list / create (max 10) / release the agent's XRPL Tickets |
 | `xrpl_agent_return_to_owner` | xrpl.agent.return | always allowed, never limited |
 | `xrpl_agent_request_funding` | xrpl.agent.fund | needs human approval (the owner tops it up) |
+| `xrpl_xaman_link`, `xrpl_xaman_status`, `xrpl_xaman_unlink` | xrpl.phone.* | link the owner's Xaman app for phone approvals |
 | `xrpl_approval_status` | — | read (returns the ledger proof once confirmed) |
 | `xrpl_tx_verify` | xrpl.ledger.proof | read |
 
@@ -119,6 +120,23 @@ An issuer can take its tokens back from a holder, for example after fraud, a mis
 3. **The wallet signs in the browser**, and the transaction goes **straight to a public XRPL node**.
 4. **The adapter checks independently.** It looks up the hash on the ledger and confirms the transaction is validated and matches the approved request **exactly**: same sender, destination, amount and times. A mismatch is marked `failed`.
 5. **The agent gets the proof.** It polls `xrpl_approval_status` and receives `confirmed` with the validated ledger proof.
+
+## Phone approvals (Xaman)
+
+**Approve your agent's requests on your phone.** This works for every approval type, including x402 paid requests. The console keeps working alongside it.
+
+1. Start the adapter with your Xaman app's **API key and secret**:
+   ```bash
+   XRPL_XAMAN_API_KEY=… XRPL_XAMAN_API_SECRET=… node packages/mcp/dist/index.js
+   ```
+   Put these in your MCP config's `env`. The secret stays in that process: it's never logged and never sent to the console or the agent.
+2. **Link your phone once.** Click **Link phone** in the console, or ask the agent to run `xrpl_xaman_link`. Then scan the QR with Xaman. It's a sign-in, not a transaction. The link token is stored in `~/.xrpl-agent/xaman.json` (mode 0600).
+3. **Approve on the phone.** From then on, every approval for that wallet, on the adapter's network, is **pushed to Xaman**:
+   - **What Xaman does:** it only **signs** (`submit: false`), locked to the network (`force_network`). The request also shows the approval's summary and ID.
+   - **What the adapter checks:** the network (NetworkID), the account, and that the transaction is **unchanged**. It then submits the transaction itself and closes the approval exactly like the console does: validated on the ledger and matching the request.
+   - **For x402,** the phone request gets a fresh quote and expires with the seller's invoice.
+- **Whichever finishes first wins.** Approve in the console and the phone request is withdrawn. Reject in Xaman and the approval is rejected. If the request expires, the approval stays open in the console.
+- Approvals for other wallets are never pushed to your phone.
 
 ## Agent accounts (autonomous spending)
 
@@ -234,6 +252,20 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
 - **Spending limits aren't solved by delegation.** XRPL's transaction-type delegation is not an amount limit. Autonomous spending will come later through a **separately funded agent account**, where the account's own balance caps the exposure.
 
 ## Status
+
+**Phone approvals (Xaman) are done.** Verified on public Testnet with a stand-in phone. The adapter, ledger and x402 seller were real.
+- **Linking:** works, and the link token is stored owner-only.
+- **Phone approvals:** a payment was approved on the phone and confirmed on the ledger. It stayed valid while the phone request was open.
+- **Refused:**
+  - a rejection in Xaman;
+  - a tampered transaction;
+  - a mainnet signature on Testnet;
+  - another wallet's approval, which was never pushed.
+- **Console wins:** the phone request was withdrawn.
+- **x402 on the phone:** a paid request approved on the phone delivered the resource.
+- **Still to do:** a hands-on test with the real Xaman app.
+
+**CI runs on GitHub Actions:** build, typecheck and offline tests on every push (Node 22 and 24), plus the full Testnet suites nightly and on demand.
 
 **x402 is complete.** Verified on public Testnet:
 - **Payments:**
