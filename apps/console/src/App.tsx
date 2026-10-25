@@ -410,7 +410,8 @@ function AgentInbox({ token, focusId, ledger, wallet, onReview, onMsg }: {
       {pending.length === 0 ? <p className="muted">No pending requests.</p> : pending.map((a) => (
         <div key={a.id} className={`req ${a.id === focusId ? "focus" : ""}`}>
           <div><b>{a.summary}</b><div className="muted small">{a.intent.tool} · {new Date(a.createdAt).toLocaleString()} · {a.network}
-            {a.phone?.state === "sent" && <> · <span className="good">📱 sent to your phone</span></>}{a.phone?.state === "expired" && <> · phone request expired</>}
+            {a.phone?.state === "sent" && <> · <span className="good">📱 sent to your phone</span>
+              {a.phone.url && <> · <a href={a.phone.url} target="_blank" rel="noreferrer">no notification? open / scan</a></>}</>}{a.phone?.state === "expired" && <> · phone request expired</>}
             {a.phone?.state === "error" && <> · <span className="bad">phone: {a.phone.note}</span></>}</div>
             {a.warnings.map((w, k) => <div key={k} className="warn small">⚠ {w}</div>)}</div>
           <div className="row">

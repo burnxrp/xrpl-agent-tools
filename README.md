@@ -263,7 +263,7 @@ This implements the [x402 v2 `exact` scheme for XRPL](https://github.com/x402-fo
   - another wallet's approval, which was never pushed.
 - **Console wins:** the phone request was withdrawn.
 - **x402 on the phone:** a paid request approved on the phone delivered the resource.
-- **Still to do:** a hands-on test with the real Xaman app.
+- **Real phone, 2026-10-25:** linked to the real Xaman app; the agent asked to send 1 XRP, it was approved on the phone (Testnet), and the adapter submitted it: `tesSUCCESS`, ledger 21,816,222. The push notification didn't show on that phone, so every request now also shows its Xaman link in the console.
 
 **CI runs on GitHub Actions:** build, typecheck and offline tests on every push (Node 22 and 24), plus the full Testnet suites nightly and on demand.
 
